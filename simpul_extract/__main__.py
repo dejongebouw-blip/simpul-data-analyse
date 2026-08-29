@@ -46,12 +46,16 @@ from simpul_extract.session import (
     SessionRound,
     credentials_from_env,
 )
+from simpul_extract.observability import configure_logging, get_logger
 from simpul_extract.storage import (
     SCHEMA,
     StorageError,
     postgrest_base_url,
     postgrest_store_from_env,
+    raise_for_write,
 )
+
+logger = get_logger(__name__)
 
 DEFAULT_PROBE_PATH = "/customer/all.json"
 
@@ -120,30 +124,50 @@ def run(
     out = stdout if stdout is not None else sys.stdout
     run_id = run_id or uuid.uuid4().hex
 
+    logger.info("ronde start, run_id %s", run_id)
     session_round = SessionRound(client, session, pot, username, password)
     session_round.start()
     try:
         session_round.ensure_live(probe_path)
-    except SessionLostError:
+    except SessionLostError as exc:
+        logger.error("sessie verloren: %s", exc)
         print("sessie: dood, login mislukt", file=out)
         return EXIT_SESSION_LOST
+    logger.info("sessie leeft; begin met ophalen")
 
     collected: Dict[str, Dict[str, Any]] = {}
     for entity in ENTITIES:
         started_at = now()
         rows: List[Dict[str, Any]] = []
         source_total: Optional[int] = None
+        pages = 0
+        logger.info("%s: ophalen begint via %s", entity.name, entity.path)
         for page in paginate(client, entity.path):
+            pages += 1
             if page.total is not None:
                 source_total = page.total
             rows.extend(entity.parse(page.items))
+            if pages % 10 == 0:
+                logger.info(
+                    "%s: %d pagina's, %d rijen (bron meldt %s)",
+                    entity.name, pages, len(rows), source_total,
+                )
+        logger.info(
+            "%s: ophalen klaar, %d pagina's, %d rijen, bron meldt %s",
+            entity.name, pages, len(rows), source_total,
+        )
         collected[entity.name] = {
             "rows": rows,
             "source_total": source_total,
             "started_at": started_at,
         }
 
+    logger.info(
+        "detailpagina's ophalen voor %d relaties",
+        len(collected["customer"]["rows"]),
+    )
     email_found = fetch_customer_emails(client, collected["customer"]["rows"])
+    logger.info("detailpagina's klaar, %d e-mailadressen gevonden", email_found)
 
     outcomes: List[EntityOutcome] = []
     incomplete = False
@@ -168,6 +192,11 @@ def run(
             source_total=source_total,
             complete=complete,
             note=note,
+        )
+        logger.info(
+            "%s: %d weggeschreven, bron meldt %s, %s",
+            entity.name, rows_stored, source_total,
+            "volledig" if complete else "ONVOLLEDIG",
         )
         outcomes.append(EntityOutcome(entity.name, rows_stored, source_total, complete))
 
@@ -220,7 +249,7 @@ class PostgrestCookiePot(CookiePot):
             params={"select": "name,value"},
             headers=self._headers(),
         )
-        response.raise_for_status()
+        raise_for_write(response, self.TABLE, "lezen")
         rows = response.json() or []
         return {
             row["name"]: row["value"]
@@ -242,7 +271,7 @@ class PostgrestCookiePot(CookiePot):
             params={"on_conflict": "name"},
             headers=self._headers(write=True),
         )
-        response.raise_for_status()
+        raise_for_write(response, self.TABLE, "upsert")
 
 
 # De bron staat vast in het PRD: `https://schoutenhoveniers.simpul.nl`. Geen
@@ -281,9 +310,15 @@ def main(argv=None) -> int:
     parser = build_parser()
     parser.parse_args(argv)
 
+    # Als eerste, vóór elke andere stap: een fout in het bedraden hoort ook
+    # al een logregel te kunnen schrijven, en de geheimen uit de omgeving
+    # moeten geregistreerd zijn voordat er iets te loggen valt.
+    configure_logging(os.environ)
+
     try:
         client, http_session, pot, store, username, password = _build_real_dependencies(os.environ)
     except (SessionError, StorageError) as exc:
+        logger.error("configuratiefout: %s", exc)
         print(f"configuratiefout: {exc}", file=sys.stderr)
         return 1
 

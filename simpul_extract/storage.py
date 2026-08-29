@@ -21,11 +21,48 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Mapping, Sequence
 
+from simpul_extract.observability import describe_http_response, get_logger
+
+logger = get_logger(__name__)
+
 SCHEMA = "simpul_raw"
 
 
 class StorageError(Exception):
     """Basisfout van de schrijflaag."""
+
+
+class StorageWriteError(StorageError):
+    """Een schrijfverzoek werd door PostgREST geweigerd.
+
+    Draagt de reden mee. `response.raise_for_status()` deed dat niet: die gaf
+    `400 Client Error: Bad Request for url: ...` en gooide de responsebody weg,
+    terwijl juist die body vertelt wélke kolom of welk type niet klopt. Drie
+    defecten op de `extraction_run`-naad waren daardoor alleen te vinden door
+    een hele ronde opnieuw te draaien.
+    """
+
+    def __init__(self, table: str, operation: str, response: Any):
+        self.table = table
+        self.operation = operation
+        self.status = getattr(response, "status_code", None)
+        self.response = response
+        super().__init__(
+            f"{operation} naar {SCHEMA}.{table} geweigerd: "
+            f"{describe_http_response(response)}"
+        )
+
+
+def raise_for_write(response: Any, table: str, operation: str) -> None:
+    """Vervangt `response.raise_for_status()` in de schrijflaag: logt en werpt
+    een fout die zijn eigen reden draagt."""
+    status = getattr(response, "status_code", 0) or 0
+    if 200 <= status < 300:
+        logger.info("%s %s.%s ok (status %s)", operation, SCHEMA, table, status)
+        return
+    error = StorageWriteError(table, operation, response)
+    logger.error("%s", error)
+    raise error
 
 
 def _default_now() -> str:
@@ -159,6 +196,10 @@ class PostgrestUpsertStore(UpsertStore):
             return UpsertResult(inserted=0, updated=0)
 
         payload = [dict(row, fetched_at=self._now()) for row in rows]
+        logger.info(
+            "upsert %s.%s: %d rijen, kolommen %s",
+            SCHEMA, table, len(payload), sorted(payload[0].keys()),
+        )
         response = self._session.post(
             f"{self._base_url}/{table}",
             json=payload,
@@ -171,7 +212,7 @@ class PostgrestUpsertStore(UpsertStore):
                 "Prefer": "resolution=merge-duplicates,return=minimal",
             },
         )
-        response.raise_for_status()
+        raise_for_write(response, table, "upsert")
         return UpsertResult(inserted=len(payload), updated=0)
 
     def append(self, table: str, rows: Sequence[Mapping[str, Any]]) -> UpsertResult:
@@ -181,6 +222,10 @@ class PostgrestUpsertStore(UpsertStore):
         if not rows:
             return UpsertResult(inserted=0, updated=0)
 
+        logger.info(
+            "append %s.%s: %d rijen, kolommen %s",
+            SCHEMA, table, len(rows), sorted(rows[0].keys()),
+        )
         response = self._session.post(
             f"{self._base_url}/{table}",
             json=[dict(row) for row in rows],
@@ -192,7 +237,7 @@ class PostgrestUpsertStore(UpsertStore):
                 "Prefer": "return=minimal",
             },
         )
-        response.raise_for_status()
+        raise_for_write(response, table, "append")
         return UpsertResult(inserted=len(rows), updated=0)
 
 

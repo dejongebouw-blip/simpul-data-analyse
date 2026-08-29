@@ -12,6 +12,10 @@ zonder netwerk en zonder echte pauzes.
 
 import time
 
+from simpul_extract.observability import get_logger
+
+logger = get_logger(__name__)
+
 DEFAULT_DELAY = 0.3
 MAX_ATTEMPTS = 4  # eerste poging + drie backoff-retries
 
@@ -59,14 +63,29 @@ class SimpulHTTPClient:
         attempt = 0
         while True:
             attempt += 1
+            logger.debug("%s %s (poging %d)", method, path, attempt)
             response = self._session.request(method, url, params=params, data=data)
             status = response.status_code
             if status == 429 or 500 <= status < 600:
                 if attempt >= self._max_attempts:
+                    logger.error(
+                        "%s %s: status %s, backoff uitgeput na %d pogingen",
+                        method, path, status, attempt,
+                    )
                     raise RetryExhaustedError(
                         f"{method} {path} bleef falen met status {status} na "
                         f"{attempt} pogingen; HTTP-laag stopt."
                     )
-                self._sleep(self.delay * (2 ** (attempt - 1)))
+                pauze = self.delay * (2 ** (attempt - 1))
+                # Deze regel is het enige spoor dat een 429 achterlaat die na
+                # backoff alsnog slaagt. Zonder hem bewijst een schone log niet
+                # dat de bron niet is overbelast, maar alleen dat geen enkel
+                # verzoek vier keer op rij faalde -- een veel zwakkere claim dan
+                # H7 uit het testplan vraagt.
+                logger.warning(
+                    "%s %s: status %s, poging %d van %d, %.1fs backoff",
+                    method, path, status, attempt, self._max_attempts, pauze,
+                )
+                self._sleep(pauze)
                 continue
             return response

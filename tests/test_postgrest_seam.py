@@ -44,9 +44,13 @@ PROJECT_URL = "https://ildofjfbqusjoaanwbmi.supabase.co"
 
 
 class _StubResponse:
-    def __init__(self, payload=None):
+    def __init__(self, payload=None, status_code=200):
         self._payload = payload if payload is not None else []
-        self.status_code = 200
+        self.status_code = status_code
+        # De schrijflaag zet body en content-type in haar foutmelding; een stub
+        # zonder die velden bootst een antwoord na dat niet bestaat.
+        self.text = ""
+        self.headers = {}
 
     def json(self):
         return self._payload

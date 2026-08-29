@@ -19,6 +19,10 @@ geformatteerd.
 
 import re
 
+from simpul_extract.observability import add_secrets, get_logger
+
+logger = get_logger(__name__)
+
 EXIT_OK = 0
 EXIT_SESSION_LOST = 2
 
@@ -121,6 +125,10 @@ def describe_response(response):
 def _apply_cookies(session, cookies):
     for name, value in cookies.items():
         session.cookies[name] = value
+        # Elke cookiewaarde die dit proces binnenkomt wordt meteen als geheim
+        # geregistreerd, zodat geen enkele logregel of foutmelding hem later
+        # per ongeluk kan echoën. Namen mogen wel: die verklaren een fout.
+        add_secrets(value)
 
 
 def _read_tracked_cookies(session):
@@ -167,12 +175,15 @@ class SessionRound:
 
     def start(self):
         """Leest de cookiepot en injecteert de cookies in de sessie."""
-        _apply_cookies(self._session, self._pot.read())
+        cookies = self._pot.read()
+        logger.info("cookiepot gelezen: %d cookies (%s)", len(cookies), sorted(cookies))
+        _apply_cookies(self._session, cookies)
         self._started = True
 
     def _login(self):
         """Doet de ene toegestane loginpoging en geeft de POST-respons terug,
         zodat een mislukking te diagnosticeren is."""
+        logger.info("sessie dood; de enige toegestane loginpoging van deze ronde")
         login_page = self._client.get("/login")
         token = _extract_csrf_token(login_page)
         return self._client.post("/login", data={
@@ -211,7 +222,12 @@ class SessionRound:
             # was de zojuist gewonnen sessie anders weg en kostte de volgende
             # ronde opnieuw een login. Aangetoond op 2026-08-29: H6 crashte op
             # de auditregel en liet de pot leeg achter.
-            self._pot.write(_read_tracked_cookies(self._session))
+            cookies = _read_tracked_cookies(self._session)
+            logger.info(
+                "login geslaagd; pot meteen geschreven: %d cookies (%s)",
+                len(cookies), sorted(cookies),
+            )
+            self._pot.write(cookies)
             return response
 
         raise SessionLostError(
@@ -222,7 +238,9 @@ class SessionRound:
 
     def finish(self):
         """Schrijft de (mogelijk geroteerde) cookiewaarde terug naar de pot."""
-        self._pot.write(_read_tracked_cookies(self._session))
+        cookies = _read_tracked_cookies(self._session)
+        logger.info("ronde klaar; pot bijgewerkt: %d cookies (%s)", len(cookies), sorted(cookies))
+        self._pot.write(cookies)
 
 
 def run_round(client, session, pot, probe_path, username, password):

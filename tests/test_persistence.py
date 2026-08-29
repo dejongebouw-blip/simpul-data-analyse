@@ -123,6 +123,21 @@ class TestElkeRijDraagtFetchedAt(unittest.TestCase):
 
 
 class _StubPostgrestResponse:
+    """Draagt een statuscode omdat de schrijflaag die leest.
+
+    Deze stub had alleen `raise_for_status()`. Daarmee bootste hij precies het
+    stuk PostgREST na dat de echte fouten verborg: een antwoord zonder status
+    en zonder body. De schrijflaag kijkt nu zelf naar de status en zet de body
+    in de foutmelding, dus de stub moet allebei dragen — anders toetst deze
+    test een naad die in productie niet bestaat
+    (`Context/lessons/2026-08-29-een-gestubde-naad-is-geen-getoetste-naad.md`).
+    """
+
+    def __init__(self, status_code=201, body="", headers=None):
+        self.status_code = status_code
+        self.text = body
+        self.headers = headers or {}
+
     def raise_for_status(self):
         return None
 

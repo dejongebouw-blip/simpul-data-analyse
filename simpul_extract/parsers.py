@@ -19,6 +19,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from bs4 import BeautifulSoup
 
+from simpul_extract.observability import get_logger
+
+logger = get_logger(__name__)
+
 
 class MissingFieldError(Exception):
     """Geworpen wanneer een bronrecord een verwacht veld mist."""
@@ -98,12 +102,19 @@ def fetch_customer_emails(client: Any, rows: List[Dict[str, Any]]) -> int:
     e-mailadres gevonden is, zodat de ronde dat kan melden.
     """
     found = 0
-    for row in rows:
+    total = len(rows)
+    for number, row in enumerate(rows, start=1):
         response = client.get(f"/customer/{row['id']}")
         detail = parse_customer_detail(response.text)
         row["email"] = detail.email
         if detail.email is not None:
             found += 1
+        # Dit is de langste stap van de ronde: eén serieel verzoek per relatie,
+        # bij 951 relaties het leeuwendeel van de looptijd. Zonder tussenstand
+        # is een ronde die hier hangt niet te onderscheiden van een ronde die
+        # gewoon werkt.
+        if number % 100 == 0 or number == total:
+            logger.info("detailpagina's: %d van %d, %d e-mailadressen", number, total, found)
     return found
 
 
