@@ -46,6 +46,63 @@ class CompletenessError(Exception):
         )
 
 
+class ConflictingDuplicateError(Exception):
+    """Twee rijen met hetzelfde `id` maar verschillende inhoud.
+
+    Ontdubbelen is alleen verdedigbaar omdat de dubbelen die de bron levert
+    aantoonbaar identiek zijn (gemeten 2026-08-29: 15 dubbele projectid's,
+    nul afwijkende velden). Zodra dat niet meer geldt is er een winnaar te
+    kiezen, en dat is een gegevensbesluit dat deze code niet stilzwijgend mag
+    nemen. Dan valt de ronde, met het id erbij.
+    """
+
+    def __init__(self, entity: str, row_id: Any):
+        self.entity = entity
+        self.row_id = row_id
+        super().__init__(
+            f"{entity}: id {row_id!r} komt meer dan eens voor met verschillende "
+            f"inhoud — ontdubbelen zou een van de twee versies weggooien"
+        )
+
+
+def dedupe_by_id(rows: Sequence[Mapping[str, Any]], *, entity: str) -> tuple:
+    """Ontdubbelt `rows` op `id` en telt hoeveel rijen er dubbel geleverd zijn.
+
+    De bron deelt dezelfde entiteit soms twee keer uit: `/project/all.json`
+    meldt 2793 rijen en levert er 2793, waarvan 2778 uniek. Postgres weigert
+    zo'n batch met 21000 ("ON CONFLICT DO UPDATE command cannot affect row a
+    second time"), want één command mag dezelfde rij niet twee keer raken.
+    Ontdubbelen hoort daarom bij het ophalen, niet bij het wegschrijven.
+
+    Behoudt de eerste rij per `id` en de volgorde van de bron. Verschillen de
+    dubbelen inhoudelijk, dan werpt dit `ConflictingDuplicateError` in plaats
+    van een winnaar te kiezen. Een rij zonder `id` gaat ongemoeid door: op een
+    ontbrekende sleutel valt niets samen te voegen, en de schrijflaag weigert
+    zo'n rij toch al.
+
+    Retourneert `(unieke_rijen, aantal_dubbel_geleverd)`.
+    """
+    unique: Dict[Any, Mapping[str, Any]] = {}
+    volgorde: List[Any] = []
+    zonder_id: List[Mapping[str, Any]] = []
+    duplicates = 0
+
+    for row in rows:
+        if "id" not in row:
+            zonder_id.append(row)
+            continue
+        row_id = row["id"]
+        if row_id not in unique:
+            unique[row_id] = row
+            volgorde.append(row_id)
+            continue
+        if unique[row_id] != row:
+            raise ConflictingDuplicateError(entity, row_id)
+        duplicates += 1
+
+    return [unique[row_id] for row_id in volgorde] + zonder_id, duplicates
+
+
 def _extraction_run_row(
     *,
     run_id: str,

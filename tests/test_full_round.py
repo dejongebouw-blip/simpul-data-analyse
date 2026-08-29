@@ -365,3 +365,89 @@ class TestEntiteitOnvolledig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBronLevertEenProjectDubbel(unittest.TestCase):
+    """Gemeten op 2026-08-29 tegen de echte bron: `/project/all.json` meldt
+    2793, levert 2793 rijen en bevat 2778 unieke id's — 15 projecten komen
+    twee keer langs, veld voor veld identiek. Ronde 5 viel daarop met
+    Postgres-21000 ("ON CONFLICT DO UPDATE command cannot affect row a second
+    time").
+
+    Deze stubset bootst dat na in het klein: vier projecten, waarvan er één
+    twee keer wordt uitgedeeld, en een bron die 5 als totaal meldt.
+    """
+
+    DUBBEL_ID = 202
+
+    def _session(self):
+        records = _project_records()
+        dubbel = next(r for r in records if r["id"] == self.DUBBEL_ID)
+        met_dubbel = records + [dict(dubbel)]
+        return FullRoundSession(
+            customer_pages=_fractal_pages(_customer_records(), per_page=2),
+            project_pages=_fractal_pages(met_dubbel, per_page=2, total=len(met_dubbel)),
+            supplier_pages=_laravel_pages(_supplier_records(), per_page=3),
+            customer_details=_customer_details(),
+            probe_live=True,
+            cookies=INITIAL_COOKIES,
+        )
+
+    def test_ronde_eindigt_met_exit_0(self):
+        """Zonder ontdubbelen weigert de schrijflaag de batch zoals Postgres
+        dat doet, en haalt de ronde exit 0 niet."""
+        exit_code, _, _, _ = _run_round(self._session())
+        self.assertEqual(exit_code, EXIT_OK)
+
+    def test_de_dubbele_rij_wordt_maar_een_keer_aangeboden(self):
+        _, store, _, _ = _run_round(self._session())
+
+        self.assertEqual(len(store.tables["project"]), 4)
+        self.assertIn(self.DUBBEL_ID, store.tables["project"])
+
+    def test_gemeld_totaal_wordt_gecorrigeerd_zodat_de_ronde_volledig_is(self):
+        """De bron telt haar dubbel geleverde rij mee in het totaal. `complete`
+        is een generated column over `rows_stored = source_total`, dus zonder
+        correctie meldt elke ronde ONVOLLEDIG op een eigenaardigheid van de
+        bron. Zie adr/2026-08-29-volledig-telt-entiteiten.md."""
+        _, store, _, _ = _run_round(self._session(), run_id="run-dubbel")
+
+        regel = next(
+            row
+            for row in store.tables[EXTRACTION_RUN_TABLE].values()
+            if row["entity"] == "project"
+        )
+        self.assertEqual(regel["rows_stored"], 4)
+        self.assertEqual(regel["source_total"], 4)
+        self.assertNotIn(
+            "complete", regel, "complete is generated en mag niet aangeleverd worden"
+        )
+
+    def test_de_note_bewaart_wat_de_bron_werkelijk_meldde(self):
+        """Het rauwe getal mag niet verdwijnen doordat de som klopt: een bron
+        die morgen 300 rijen dubbel levert moet zichtbaar blijven."""
+        _, store, _, _ = _run_round(self._session(), run_id="run-note")
+
+        regel = next(
+            row
+            for row in store.tables[EXTRACTION_RUN_TABLE].values()
+            if row["entity"] == "project"
+        )
+        self.assertEqual(regel["note"], "bron meldde 5, 1 rijen dubbel geleverd")
+
+    def test_entiteiten_zonder_dubbelen_houden_een_lege_note(self):
+        _, store, _, _ = _run_round(self._session(), run_id="run-schoon")
+
+        noten = {
+            row["entity"]: row["note"]
+            for row in store.tables[EXTRACTION_RUN_TABLE].values()
+        }
+        self.assertIsNone(noten["customer"])
+        self.assertIsNone(noten["supplier"])
+
+    def test_slotoverzicht_noemt_het_dubbel_geleverde_aantal(self):
+        _, _, _, stdout = _run_round(self._session())
+
+        overzicht = stdout.getvalue()
+        self.assertIn("project: gevonden 4, gemeld 4, 1 dubbel geleverd (ok)", overzicht)
+        self.assertIn("customer: gevonden 3, gemeld 3 (ok)", overzicht)

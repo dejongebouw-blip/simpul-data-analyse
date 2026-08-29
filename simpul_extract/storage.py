@@ -137,6 +137,22 @@ class InMemoryUpsertStore(UpsertStore):
         existing = self.tables.setdefault(table, {})
         inserted = 0
         updated = 0
+        # Dezelfde weigering als Postgres: één upsert-command mag dezelfde rij
+        # niet twee keer raken (21000, "ON CONFLICT DO UPDATE command cannot
+        # affect row a second time"). Tot 2026-08-29 slikte deze nep-store zo'n
+        # batch stilzwijgend -- de tweede rij overschreef gewoon de eerste --
+        # en dus kon geen enkele test zien dat de bron 15 projecten dubbel
+        # levert. Ronde 5 tegen de echte database zag het wel. Een naad die
+        # meer toelaat dan het echte ding toetst niets.
+        gezien = set()
+        for row in rows:
+            if "id" in row:
+                if row["id"] in gezien:
+                    raise StorageError(
+                        f"upsert naar {table!r} biedt id {row['id']!r} meer dan eens "
+                        f"aan in dezelfde batch; Postgres weigert dat met 21000"
+                    )
+                gezien.add(row["id"])
         for row in rows:
             if "id" not in row:
                 raise StorageError(

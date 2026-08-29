@@ -22,6 +22,8 @@ from simpul_extract.completeness import (
     EXIT_INCOMPLETE,
     EXIT_OK,
     CompletenessError,
+    ConflictingDuplicateError,
+    dedupe_by_id,
     run_entity_round,
 )
 from simpul_extract.paginate import paginate
@@ -119,3 +121,76 @@ class TestOntbrekendTotaalGeldtAlsOnvolledig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOntdubbelenOpId(unittest.TestCase):
+    """De bron levert dezelfde entiteit soms twee keer. Gemeten op 2026-08-29:
+    `/project/all.json` meldt 2793, levert 2793 rijen, 2778 unieke id's, en de
+    15 dubbelen zijn veld voor veld identiek. Postgres weigert zo'n batch met
+    21000, dus ontdubbelen gebeurt vóór het wegschrijven."""
+
+    def test_identieke_dubbelen_vallen_samen_en_worden_geteld(self):
+        rijen = [
+            {"id": 1, "name": "een"},
+            {"id": 2, "name": "twee"},
+            {"id": 1, "name": "een"},
+        ]
+
+        uniek, dubbel = dedupe_by_id(rijen, entity="project")
+
+        self.assertEqual(dubbel, 1)
+        self.assertEqual(uniek, [{"id": 1, "name": "een"}, {"id": 2, "name": "twee"}])
+
+    def test_volgorde_van_de_bron_blijft_staan(self):
+        rijen = [{"id": i, "name": str(i)} for i in (3, 1, 2)] + [{"id": 3, "name": "3"}]
+
+        uniek, _ = dedupe_by_id(rijen, entity="project")
+
+        self.assertEqual([r["id"] for r in uniek], [3, 1, 2])
+
+    def test_zonder_dubbelen_verandert_er_niets(self):
+        rijen = [{"id": 1}, {"id": 2}, {"id": 3}]
+
+        uniek, dubbel = dedupe_by_id(rijen, entity="supplier")
+
+        self.assertEqual(dubbel, 0)
+        self.assertEqual(uniek, rijen)
+
+    def test_geneste_waarden_tellen_mee_in_de_vergelijking(self):
+        """`project_location` is een dict; twee rijen zijn pas identiek als ook
+        die inhoud gelijk is."""
+        rijen = [
+            {"id": 1, "project_location": {"data": []}},
+            {"id": 1, "project_location": {"data": []}},
+        ]
+
+        uniek, dubbel = dedupe_by_id(rijen, entity="project")
+
+        self.assertEqual(dubbel, 1)
+        self.assertEqual(len(uniek), 1)
+
+    def test_verschillende_inhoud_onder_hetzelfde_id_werpt(self):
+        """Ontdubbelen is alleen verdedigbaar omdat de dubbelen identiek zijn.
+        Zijn ze dat niet, dan is er een winnaar te kiezen — en dat besluit hoort
+        niet stilzwijgend in deze code te vallen."""
+        rijen = [
+            {"id": 1, "status_id": "Uitvoering"},
+            {"id": 1, "status_id": "Archief"},
+        ]
+
+        with self.assertRaises(ConflictingDuplicateError) as ctx:
+            dedupe_by_id(rijen, entity="project")
+
+        self.assertEqual(ctx.exception.entity, "project")
+        self.assertEqual(ctx.exception.row_id, 1)
+        self.assertIn("1", str(ctx.exception))
+
+    def test_rij_zonder_id_gaat_ongemoeid_door(self):
+        """Op een ontbrekende sleutel valt niets samen te voegen; twee rijen
+        zonder `id` mogen niet stilzwijgend één rij worden."""
+        rijen = [{"name": "geen id"}, {"name": "ook geen id"}]
+
+        uniek, dubbel = dedupe_by_id(rijen, entity="project")
+
+        self.assertEqual(dubbel, 0)
+        self.assertEqual(len(uniek), 2)

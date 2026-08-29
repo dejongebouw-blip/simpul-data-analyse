@@ -6,11 +6,13 @@ Vaste volgorde (zie ook `simpul_extract/session.py` voor de sessiestap):
   1. Cookiepot lezen en cookies injecteren.
   2. Sessie levend bewijzen; dood -> één loginpoging; mislukt -> EXIT_SESSION_LOST,
      niets geschreven.
-  3. Per entiteit pagineren en parsen (nog niet wegschrijven).
+  3. Per entiteit pagineren, parsen en ontdubbelen op `id` (nog niet
+     wegschrijven): de bron deelt dezelfde entiteit soms twee keer uit.
   4. Relatiedetails ophalen voor `email` op de al geparste customer-rijen.
   5. Wegschrijven: elke entiteit in één upsert naar zijn tabel.
   6. Volledigheid toetsen per entiteit (rows_stored vs. het door de bron
-     gemelde totaal) en de auditregel schrijven — ook bij een falende toets.
+     gemelde totaal, gecorrigeerd voor dubbel geleverde rijen) en de
+     auditregel schrijven — ook bij een falende toets.
   7. Geroteerde cookie terugschrijven naar de pot, ongeacht de uitkomst van
      stap 6: een datafout mag de sessie niet kosten.
 
@@ -28,7 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, TextIO
 
-from simpul_extract.completeness import EXIT_INCOMPLETE, write_extraction_run
+from simpul_extract.completeness import EXIT_INCOMPLETE, dedupe_by_id, write_extraction_run
 from simpul_extract.http_client import SimpulHTTPClient
 from simpul_extract.parsers import (
     fetch_customer_emails,
@@ -86,6 +88,7 @@ class EntityOutcome:
     rows_stored: int
     source_total: Optional[int]
     complete: bool
+    duplicates: int = 0
 
 
 def _default_now() -> str:
@@ -97,8 +100,9 @@ def format_summary(outcomes: Sequence[EntityOutcome], email_found: int) -> str:
     aantal gevonden e-mailadressen en de sessiestatus. Draagt nooit een
     cookiewaarde of wachtwoord."""
     lines = [
-        f"{outcome.entity}: gevonden {outcome.rows_stored}, gemeld {outcome.source_total} "
-        f"({'ok' if outcome.complete else 'onvolledig'})"
+        f"{outcome.entity}: gevonden {outcome.rows_stored}, gemeld {outcome.source_total}"
+        + (f", {outcome.duplicates} dubbel geleverd" if outcome.duplicates else "")
+        + f" ({'ok' if outcome.complete else 'onvolledig'})"
         for outcome in outcomes
     ]
     lines.append(f"e-mailadressen gevonden: {email_found}")
@@ -152,6 +156,16 @@ def run(
                     "%s: %d pagina's, %d rijen (bron meldt %s)",
                     entity.name, pages, len(rows), source_total,
                 )
+        # De bron kan dezelfde entiteit twee keer uitdelen; Postgres weigert
+        # zo'n batch met 21000. Ontdubbelen hoort daarom hier, bij het ophalen,
+        # en niet bij het wegschrijven -- en het aantal reist mee, want het
+        # corrigeert straks het door de bron gemelde totaal.
+        rows, duplicates = dedupe_by_id(rows, entity=entity.name)
+        if duplicates:
+            logger.info(
+                "%s: %d dubbel geleverde rijen ontdubbeld op id, %d uniek over",
+                entity.name, duplicates, len(rows),
+            )
         logger.info(
             "%s: ophalen klaar, %d pagina's, %d rijen, bron meldt %s",
             entity.name, pages, len(rows), source_total,
@@ -159,6 +173,7 @@ def run(
         collected[entity.name] = {
             "rows": rows,
             "source_total": source_total,
+            "duplicates": duplicates,
             "started_at": started_at,
         }
 
@@ -176,7 +191,18 @@ def run(
         rows = data["rows"]
         store.upsert(entity.table, rows)
         rows_stored = len(rows)
-        source_total = data["source_total"]
+        duplicates = data["duplicates"]
+        gemeld_totaal = data["source_total"]
+        # `complete` telt entiteiten, niet uitgedeelde rijen -- besluit van
+        # 2026-08-29, zie adr/2026-08-29-volledig-telt-entiteiten.md. De bron
+        # telt haar dubbel geleverde rijen mee in het gemelde totaal, dus dat
+        # totaal wordt met exact dat aantal gecorrigeerd. Zonder die correctie
+        # meldt elke ronde ONVOLLEDIG op een eigenaardigheid van de bron, en
+        # een alarm dat altijd afgaat is geen alarm meer. Het rauwe getal
+        # verdwijnt niet: het staat in `note`, ook bij een geslaagde ronde.
+        source_total = gemeld_totaal
+        if gemeld_totaal is not None and duplicates:
+            source_total = gemeld_totaal - duplicates
         # Dezelfde som die `extraction_run.complete` in de database is: die
         # kolom is generated, dus hij gaat niet mee in de auditregel. Hier
         # nodig voor `note`, het slotoverzicht en de exitcode.
@@ -184,7 +210,14 @@ def run(
         if not complete:
             incomplete = True
         finished_at = now()
-        note = None if complete else f"{rows_stored} weggeschreven, bron meldt {source_total}"
+        notities = []
+        if duplicates:
+            notities.append(
+                f"bron meldde {gemeld_totaal}, {duplicates} rijen dubbel geleverd"
+            )
+        if not complete:
+            notities.append(f"{rows_stored} weggeschreven, bron meldt {source_total}")
+        note = "; ".join(notities) if notities else None
         write_extraction_run(
             store,
             run_id=run_id,
@@ -200,7 +233,9 @@ def run(
             entity.name, rows_stored, source_total,
             "volledig" if complete else "ONVOLLEDIG",
         )
-        outcomes.append(EntityOutcome(entity.name, rows_stored, source_total, complete))
+        outcomes.append(
+            EntityOutcome(entity.name, rows_stored, source_total, complete, duplicates)
+        )
 
     session_round.finish()
 
