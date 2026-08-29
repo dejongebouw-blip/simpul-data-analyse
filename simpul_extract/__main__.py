@@ -46,7 +46,12 @@ from simpul_extract.session import (
     SessionRound,
     credentials_from_env,
 )
-from simpul_extract.storage import SCHEMA, StorageError, postgrest_store_from_env
+from simpul_extract.storage import (
+    SCHEMA,
+    StorageError,
+    postgrest_base_url,
+    postgrest_store_from_env,
+)
 
 DEFAULT_PROBE_PATH = "/customer/all.json"
 
@@ -174,15 +179,21 @@ def run(
 
 
 class PostgrestCookiePot(CookiePot):
-    """Productie-cookiepot: één rij (id=1) in `simpul_raw.session_cookie`
-    via PostgREST, met dezelfde on-conflict-aanpak als `PostgrestUpsertStore`.
-    Voert geen DDL uit; het schema bestaat al of dit faalt (issue 11)."""
+    """Productie-cookiepot tegen `simpul_raw.session_cookie` via PostgREST,
+    met dezelfde on-conflict-aanpak als `PostgrestUpsertStore`. Voert geen DDL
+    uit; het schema bestaat al of dit faalt (issue 11).
+
+    De tabel draagt **één rij per cookie** — `name` is de primaire sleutel,
+    `value` de waarde, `updated_at` het tijdstip — precies zoals issue 11 en
+    het PRD hem beschrijven. Een eerdere versie schreef één rij `id=1` met een
+    JSON-kolom `cookies`; die kolommen bestaan niet en elk verzoek liep op een
+    PostgREST-fout. Q5/Q6/Q14 misten dat omdat de pot daar gestubd is.
+    """
 
     TABLE = "session_cookie"
-    ROW_ID = 1
 
     def __init__(self, base_url: str, api_key: str, session: Any = None):
-        self._base_url = base_url.rstrip("/")
+        self._base_url = postgrest_base_url(base_url)
         self._api_key = api_key
         if session is not None:
             self._session = session
@@ -206,30 +217,52 @@ class PostgrestCookiePot(CookiePot):
     def read(self) -> Dict[str, str]:
         response = self._session.get(
             f"{self._base_url}/{self.TABLE}",
-            params={"id": f"eq.{self.ROW_ID}", "select": "cookies"},
+            params={"select": "name,value"},
             headers=self._headers(),
         )
         response.raise_for_status()
-        rows = response.json()
-        if not rows:
-            return {}
-        return dict(rows[0].get("cookies") or {})
+        rows = response.json() or []
+        return {
+            row["name"]: row["value"]
+            for row in rows
+            if row.get("name") and row.get("value") is not None
+        }
 
     def write(self, cookies: Mapping[str, str]) -> None:
+        if not cookies:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        payload = [
+            {"name": name, "value": value, "updated_at": now}
+            for name, value in cookies.items()
+        ]
         response = self._session.post(
             f"{self._base_url}/{self.TABLE}",
-            json=[{"id": self.ROW_ID, "cookies": dict(cookies)}],
-            params={"on_conflict": "id"},
+            json=payload,
+            params={"on_conflict": "name"},
             headers=self._headers(write=True),
         )
         response.raise_for_status()
+
+
+# De bron staat vast in het PRD: `https://schoutenhoveniers.simpul.nl`. Geen
+# geheim, dus geen omgevingsvariabele die de PRD-`docker run` moet meegeven —
+# die geeft alleen de vier geheimen door. `SIMPUL_BASE_URL` blijft als
+# overschrijving bestaan (bijv. een acceptatiehost), maar een lege of
+# ontbrekende waarde valt terug op de bron, niet op een lege basis: met een
+# lege basis werd elk pad relatief en faalde de hele ronde.
+DEFAULT_SIMPUL_BASE_URL = "https://schoutenhoveniers.simpul.nl"
+
+
+def simpul_base_url(env: Mapping[str, str]) -> str:
+    return (env.get("SIMPUL_BASE_URL") or DEFAULT_SIMPUL_BASE_URL).rstrip("/")
 
 
 def _build_real_dependencies(env: Mapping[str, str]):
     import requests
 
     http_session = requests.Session()
-    client = SimpulHTTPClient(http_session, base_url=env.get("SIMPUL_BASE_URL", ""))
+    client = SimpulHTTPClient(http_session, base_url=simpul_base_url(env))
     username, password = credentials_from_env(env)
     store = postgrest_store_from_env(env)
     pot = PostgrestCookiePot(env.get("SUPABASE_URL", ""), env.get("SUPABASE_SECRET_KEY", ""))

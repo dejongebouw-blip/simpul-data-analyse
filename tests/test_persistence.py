@@ -176,8 +176,10 @@ class TestPostgrestStoreFromEnv(unittest.TestCase):
             postgrest_store_from_env({})
 
     def test_bouwt_store_uit_env(self):
+        # De projecturl zoals Supabase hem uitgeeft: zonder pad. Dat `/rest/v1`
+        # er hier bijkomt, toetst tests/test_postgrest_seam.py.
         store = postgrest_store_from_env({
-            "SUPABASE_URL": "https://example.invalid/rest/v1",
+            "SUPABASE_URL": "https://example.invalid",
             "SUPABASE_SECRET_KEY": "geheim",
         })
         self.assertIsInstance(store, PostgrestUpsertStore)

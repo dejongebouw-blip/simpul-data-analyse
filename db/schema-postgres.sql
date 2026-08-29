@@ -10,7 +10,10 @@
 -- (`anon`/`authenticated`) krijgt hier niets: RLS staat aan op elke tabel
 -- zonder een enkele policy, dus is elke tabel standaard dicht voor die
 -- rollen, en de directe grants worden er bovenop expliciet ingetrokken —
--- ook voor tabellen die hier later bijkomen.
+-- ook voor tabellen die hier later bijkomen. De secret key draait als
+-- `service_role` en krijgt onderaan expliciet wel `usage` op het schema plus
+-- lees- en schrijfrechten op de tabellen; zonder die grants is het schema ook
+-- voor de schrijflaag dicht.
 
 create schema if not exists simpul_raw;
 
@@ -95,4 +98,19 @@ drop policy if exists session_cookie_no_policy on simpul_raw.session_cookie;
 -- Directe grants intrekken: schema, bestaande tabellen, en toekomstige tabellen.
 revoke all on schema simpul_raw from anon, authenticated;
 revoke all on all tables in schema simpul_raw from anon, authenticated;
+revoke all on all sequences in schema simpul_raw from anon, authenticated;
 alter default privileges in schema simpul_raw revoke all on tables from anon, authenticated;
+alter default privileges in schema simpul_raw revoke all on sequences from anon, authenticated;
+
+-- De secret-key-route juist wel openzetten. `service_role` heeft BYPASSRLS, dus
+-- RLS met nul policies sluit hem niet buiten -- maar zonder `usage` op het
+-- schema komt hij er evengoed niet in, en zonder table grants evenmin. H2 heeft
+-- dat gat aangetoond: de schema-ACL stond op `{postgres=UC/postgres}` en de in
+-- deze ronde nieuw aangemaakte `session_cookie` had alleen grants voor
+-- `postgres`. De `alter default privileges` hieronder houdt dat gat dicht voor
+-- elke tabel die er later bijkomt.
+grant usage on schema simpul_raw to service_role;
+grant select, insert, update, delete on all tables in schema simpul_raw to service_role;
+grant usage, select on all sequences in schema simpul_raw to service_role;
+alter default privileges in schema simpul_raw grant select, insert, update, delete on tables to service_role;
+alter default privileges in schema simpul_raw grant usage, select on sequences to service_role;

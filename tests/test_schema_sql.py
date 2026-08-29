@@ -2,7 +2,9 @@
 letterlijk volgt: alle vijf tabellen, kolomnamen exact zoals in de
 veldafbeelding, RLS aan op elke tabel zonder een enkele policy, en de
 grants voor `anon`/`authenticated` ingetrokken (schema, bestaande tabellen,
-en via `alter default privileges` ook toekomstige tabellen).
+en via `alter default privileges` ook toekomstige tabellen), en de
+spiegelbeeldige grants die de secret-key-route (`service_role`) juist wel
+openzetten.
 
 De verwachte kolomlijsten hieronder zijn met de hand overgetypt uit issue 11,
 onafhankelijk van het SQL-bestand — net als in issue 06
@@ -132,6 +134,25 @@ REVOKE_STATEMENTS = (
     r"alter default privileges in schema simpul_raw revoke all on tables from",
 )
 
+# De keerzijde van de revokes: zonder deze drie is het schema ook voor de
+# secret key dicht en kan de schrijflaag geen rij wegschrijven. H2 (testplan)
+# vond precies dat gat op de draaiende database -- de schema-ACL stond op
+# `{postgres=UC/postgres}` en de nieuw aangemaakte `session_cookie` had alleen
+# grants voor `postgres`. Deze test houdt het gat dicht in het bestand zelf.
+SERVICE_ROLE_GRANTS = (
+    r"grant usage on schema simpul_raw to",
+    r"grant select, insert, update, delete on all tables in schema simpul_raw to",
+    r"alter default privileges in schema simpul_raw grant select, insert, update, delete on tables to",
+)
+
+
+def _statement_targets_role(code: str, statement_prefix: str, role: str) -> bool:
+    """True als het eerste statement met dit voorvoegsel `role` als doel heeft."""
+    match = re.search(statement_prefix + r"([^;]*)", code, re.IGNORECASE)
+    if not match:
+        return False
+    return role in match.group(1)
+
 
 class TestSchemaFileExists(unittest.TestCase):
     def test_file_exists(self) -> None:
@@ -176,6 +197,28 @@ class TestSchemaContract(unittest.TestCase):
                     _revoke_covers_both_roles(self.code, statement),
                     f"revoke ontbreekt of dekt niet zowel anon als authenticated: {statement!r}",
                 )
+
+    def test_secret_key_route_is_granted_to_service_role(self) -> None:
+        for statement in SERVICE_ROLE_GRANTS:
+            with self.subTest(statement=statement):
+                self.assertTrue(
+                    _statement_targets_role(self.code, statement, "service_role"),
+                    f"grant voor service_role ontbreekt: {statement!r}. Zonder deze "
+                    f"grant is simpul_raw ook voor de secret key dicht en kan de "
+                    f"schrijflaag niets wegschrijven.",
+                )
+
+    def test_service_role_grants_do_not_include_anon_or_authenticated(self) -> None:
+        """De grants openen alleen de secret-key-route. Kwam `anon` of
+        `authenticated` in een grantregel terecht, dan zou het schema juist
+        opengaan voor de publishable key -- de fout die SC-9 uitsluit."""
+        for statement in SERVICE_ROLE_GRANTS:
+            for role in ("anon", "authenticated"):
+                with self.subTest(statement=statement, role=role):
+                    self.assertFalse(
+                        _statement_targets_role(self.code, statement, role),
+                        f"{role!r} staat in een grantregel: {statement!r}",
+                    )
 
 
 class TestCounterPin(unittest.TestCase):
@@ -225,6 +268,25 @@ class TestCounterPin(unittest.TestCase):
         broken = "revoke all on schema simpul_raw from anon;"
         self.assertFalse(
             _revoke_covers_both_roles(broken, r"revoke all on schema simpul_raw from")
+        )
+
+    def test_missing_service_role_grant_is_detected(self) -> None:
+        """De toestand van vóór H2: wel afsluiten, niet openzetten."""
+        broken = "revoke all on schema simpul_raw from anon, authenticated;"
+        self.assertFalse(
+            _statement_targets_role(
+                broken, r"grant usage on schema simpul_raw to", "service_role"
+            )
+        )
+
+    def test_grant_to_anon_is_detected(self) -> None:
+        """De omgekeerde fout: het schema per ongeluk openzetten voor de
+        publishable key."""
+        broken = "grant usage on schema simpul_raw to anon, service_role;"
+        self.assertTrue(
+            _statement_targets_role(
+                broken, r"grant usage on schema simpul_raw to", "anon"
+            )
         )
 
 

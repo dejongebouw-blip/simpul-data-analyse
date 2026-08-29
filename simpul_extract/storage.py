@@ -151,6 +151,24 @@ class PostgrestUpsertStore(UpsertStore):
         return UpsertResult(inserted=len(payload), updated=0)
 
 
+REST_PATH = "/rest/v1"
+
+
+def postgrest_base_url(supabase_url: str) -> str:
+    """Maakt van de Supabase-projecturl het PostgREST-eindpunt.
+
+    `SUPABASE_URL` is bij Supabase de projecturl zonder pad
+    (`https://<ref>.supabase.co`); PostgREST hangt daar onder `/rest/v1`. De
+    schrijflaag plakt de tabelnaam achter deze basis, dus zonder `/rest/v1`
+    landt een upsert op de projectroot en geeft 404. Een url die het pad al
+    draagt blijft ongemoeid, zodat een expliciet gezette basis blijft werken.
+    """
+    base = (supabase_url or "").rstrip("/")
+    if base.endswith(REST_PATH):
+        return base
+    return base + REST_PATH
+
+
 def postgrest_store_from_env(env: Mapping[str, str]) -> PostgrestUpsertStore:
     """Bouwt de echte schrijflaag uit `SUPABASE_URL`/`SUPABASE_SECRET_KEY`
     in `env` (bijv. `os.environ`)."""
@@ -160,4 +178,4 @@ def postgrest_store_from_env(env: Mapping[str, str]) -> PostgrestUpsertStore:
         raise StorageError(
             "SUPABASE_URL en SUPABASE_SECRET_KEY zijn beide vereist voor de schrijflaag"
         )
-    return PostgrestUpsertStore(base_url, api_key)
+    return PostgrestUpsertStore(postgrest_base_url(base_url), api_key)
