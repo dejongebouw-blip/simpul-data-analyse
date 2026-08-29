@@ -14,7 +14,10 @@ wordt, niet een rij met een NULL die niemand opmerkt.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Mapping, Optional
+
+from bs4 import BeautifulSoup
 
 
 class MissingFieldError(Exception):
@@ -51,6 +54,57 @@ def parse_customer_list(records: Iterable[Mapping[str, Any]]) -> List[Dict[str, 
         row["email"] = None
         rows.append(row)
     return rows
+
+
+# --------------------------------------------------------------- customer detail
+# Bron: GET /customer/{id} (HTML). Levert alleen `email`; contactpersonen,
+# notities, bestanden en de projectlijst op dat scherm zijn buiten scope
+# (issue 09 — Out of Scope in het PRD).
+
+
+@dataclass(frozen=True)
+class Detail:
+    """Resultaat van het parsen van één relatiedetailpagina. `email` is
+    `None` wanneer de pagina geen `mailto:`-anker draagt — dat is een
+    toegestane, geen foutieve, uitkomst."""
+
+    email: Optional[str]
+
+
+def parse_customer_detail(html: str) -> Detail:
+    """Haalt het e-mailadres uit het eerste `a[href^="mailto:"]`-anker in
+    documentvolgorde.
+
+    Structureel, niet regex op vrije tekst: een adres dat ergens in een
+    notitieveld staat maar niet in een `mailto:`-anker wordt genegeerd, ook
+    al zou een regex het daar wél vinden.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    anchor = soup.select_one('a[href^="mailto:"]')
+    if anchor is None:
+        return Detail(email=None)
+
+    href = anchor.get("href", "")
+    email = href[len("mailto:"):].split("?", 1)[0].strip()
+    return Detail(email=email or None)
+
+
+def fetch_customer_emails(client: Any, rows: List[Dict[str, Any]]) -> int:
+    """Haalt voor elke customer-rij `/customer/{id}` op en vult `email`.
+
+    Serieel via de meegegeven `client` (de HTTP-laag uit issue 03): dezelfde
+    pauze en backoff als elk ander verzoek, geen apart HTTP-pad. Muteert
+    `rows` in place en retourneert het aantal rijen waarvoor een
+    e-mailadres gevonden is, zodat de ronde dat kan melden.
+    """
+    found = 0
+    for row in rows:
+        response = client.get(f"/customer/{row['id']}")
+        detail = parse_customer_detail(response.text)
+        row["email"] = detail.email
+        if detail.email is not None:
+            found += 1
+    return found
 
 
 # ------------------------------------------------------------------- project

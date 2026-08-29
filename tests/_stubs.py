@@ -225,6 +225,52 @@ def synthetic_supplier_record(**overrides):
     return record
 
 
+def customer_detail_html_with_mailto(email="info@voorbeeld-groenvoorziening.example", extra_mailtos=()):
+    """Detailpagina zoals relatie 32475/32476 in de inventaris: een
+    `mailto:`-anker in het contactblok. Structuur afgeleid van de
+    vastgelegde bron (M1, `inventaris-endpoints.md`), niet een gedumpte
+    productiepagina. `extra_mailtos` voegt verdere ankers ná het eerste toe,
+    voor de "eerste anker in documentvolgorde"-toets."""
+    extra = "".join(f'<a href="mailto:{addr}">{addr}</a>' for addr in extra_mailtos)
+    return f"""<html><body>
+<div class="customer-detail">
+  <h1>Voorbeeld Groenvoorziening B.V.</h1>
+  <div class="contact-block">
+    <a href="mailto:{email}">{email}</a>
+    {extra}
+  </div>
+</div>
+</body></html>"""
+
+
+def customer_detail_html_without_mailto():
+    """Detailpagina zonder `mailto:`-anker, zoals relatie 32477 in de
+    inventaris: geen e-mailadres geregistreerd."""
+    return """<html><body>
+<div class="customer-detail">
+  <h1>Andere Relatie B.V.</h1>
+  <div class="contact-block">
+    <span class="phone">010-7654321</span>
+  </div>
+</div>
+</body></html>"""
+
+
+def customer_detail_html_with_email_in_free_text():
+    """Decoy: een e-mailadres in een notitietekst, buiten elk anker. Een
+    regex op vrije tekst zou dit oppikken; de structurele haak op
+    `a[href^="mailto:"]` mag dat niet doen."""
+    return """<html><body>
+<div class="customer-detail">
+  <h1>Relatie Met Notitie</h1>
+  <div class="notes">
+    Vragen over de factuur? Neem contact op met de boekhouder via
+    boekhouder@extern-kantoor.example, niet via dit scherm.
+  </div>
+</div>
+</body></html>"""
+
+
 def make_paginate_client(pages, path=None):
     """Bouwt een SimpulHTTPClient bovenop een `PagedSession`, zonder netwerk
     en zonder echte pauzes."""
