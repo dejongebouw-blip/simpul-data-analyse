@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Iterable, Mapping, Optional
+from typing import Callable, Iterable, Mapping, Optional
+
+from simpul_extract.http_client import DEFAULT_DELAY_SECONDS, SimpulHTTPError
 
 REQUIRED_ENV_VARS = ("SUPABASE_URL", "SUPABASE_SECRET_KEY")
 
@@ -22,9 +24,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--delay",
         type=float,
-        default=1.0,
+        default=DEFAULT_DELAY_SECONDS,
         metavar="SECONDS",
-        help="Wachttijd in seconden tussen HTTP-verzoeken (standaard: 1.0).",
+        help=(
+            "Wachttijd in seconden tussen HTTP-verzoeken "
+            f"(standaard: {DEFAULT_DELAY_SECONDS})."
+        ),
     )
     return parser
 
@@ -37,9 +42,12 @@ def find_missing_env(env: Mapping[str, str]) -> Optional[str]:
     return None
 
 
-def main(argv: Optional[Iterable[str]] = None) -> int:
+def main(
+    argv: Optional[Iterable[str]] = None,
+    run: Optional[Callable[[argparse.Namespace], int]] = None,
+) -> int:
     parser = build_parser()
-    parser.parse_args(list(argv) if argv is not None else None)
+    args = parser.parse_args(list(argv) if argv is not None else None)
 
     missing = find_missing_env(os.environ)
     if missing is not None:
@@ -49,7 +57,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         )
         return 2
 
-    return 0
+    # `run` is het injectiepunt voor de ophaallagen uit latere issues.
+    if run is None:
+        return 0
+    try:
+        return int(run(args))
+    except SimpulHTTPError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
 
 
 if __name__ == "__main__":
