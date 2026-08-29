@@ -19,7 +19,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, TextIO
 
-from simpul_extract.paginate import Page, laravel_pages
+from simpul_extract.customers import (
+    CUSTOMER_PATH,
+    CUSTOMER_TABLE,
+    parse_customer_list,
+)
+from simpul_extract.paginate import Page, fractal_pages, laravel_pages
+from simpul_extract.projects import (
+    PROJECT_PATH,
+    PROJECT_TABLE,
+    parse_project_list,
+)
 from simpul_extract.suppliers import (
     SUPPLIER_PATH,
     SUPPLIER_TABLE,
@@ -58,6 +68,24 @@ SUPPLIER_SPEC = EntitySpec(
     pages=laravel_pages,
     parse=parse_supplier_list,
 )
+
+CUSTOMER_SPEC = EntitySpec(
+    entity="customer",
+    table=CUSTOMER_TABLE,
+    path=CUSTOMER_PATH,
+    pages=fractal_pages,
+    parse=parse_customer_list,
+)
+
+PROJECT_SPEC = EntitySpec(
+    entity="project",
+    table=PROJECT_TABLE,
+    path=PROJECT_PATH,
+    pages=fractal_pages,
+    parse=parse_project_list,
+)
+
+DEFAULT_SPECS = (CUSTOMER_SPEC, PROJECT_SPEC, SUPPLIER_SPEC)
 
 
 def _utcnow() -> datetime:
@@ -104,22 +132,34 @@ def run(
     *,
     client: Any,
     writer: Any,
-    specs: Sequence[EntitySpec] = (SUPPLIER_SPEC,),
+    specs: Sequence[EntitySpec] = DEFAULT_SPECS,
     run_id: Optional[str] = None,
     now: Callable[[], datetime] = _utcnow,
+    stdout: Optional[TextIO] = None,
     stderr: Optional[TextIO] = None,
 ) -> int:
     if run_id is None:
         run_id = str(uuid.uuid4())
+    if stdout is None:
+        stdout = sys.stdout
     if stderr is None:
         stderr = sys.stderr
     exit_code = 0
+    reports = []
     for spec in specs:
         try:
-            extract_entity(
+            audit = extract_entity(
                 client=client, writer=writer, spec=spec, run_id=run_id, now=now
             )
         except CompletenessError as exc:
             stderr.write(f"error: {exc}\n")
             exit_code = 1
+            reports.append((spec.entity, exc.found, exc.expected))
+        else:
+            reports.append(
+                (spec.entity, audit["rows_stored"], audit["source_total"])
+            )
+    for entity, stored, total in reports:
+        reported = "onbekend" if total is None else str(total)
+        stdout.write(f"{entity}: {stored} opgeslagen van {reported} gemeld\n")
     return exit_code

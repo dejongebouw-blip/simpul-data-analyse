@@ -131,7 +131,147 @@ def supplier_pages(
     }
 
 
-def make_client(transport: PagedTransport):
+class RoutedTransport:
+    """Serveert per route (padfragment) een eigen reeks vooraf gebouwde
+    pagina's op ``?page=N``, zodat één client meerdere endpoints kan
+    doorlopen zonder netwerk."""
+
+    def __init__(self, routes: Mapping[str, Mapping[int, Any]]) -> None:
+        self._routes = {path: dict(pages) for path, pages in routes.items()}
+        self.calls: List[Tuple[str, Dict[str, Any]]] = []
+
+    def get(self, url: str, params: Optional[Mapping[str, Any]] = None) -> JSONResponse:
+        query = dict(params or {})
+        self.calls.append((url, query))
+        for path, pages in self._routes.items():
+            if path in url:
+                page = int(query.get("page", 1))
+                if page not in pages:
+                    raise AssertionError(
+                        f"onverwachte paginavraag voor {path}: page={page}; "
+                        f"beschikbaar: {sorted(pages)}"
+                    )
+                return JSONResponse(pages[page])
+        raise AssertionError(f"onverwachte route: {url}")
+
+    def requested_pages_for(self, path: str) -> List[int]:
+        return [
+            int(query.get("page", 1))
+            for url, query in self.calls
+            if path in url
+        ]
+
+
+def fractal_page(
+    *,
+    data: List[Dict[str, Any]],
+    current_page: int,
+    total_pages: int,
+    total: int,
+    per_page: int = 50,
+) -> Dict[str, Any]:
+    return {
+        "data": list(data),
+        "meta": {
+            "pagination": {
+                "total": total,
+                "count": len(data),
+                "per_page": per_page,
+                "current_page": current_page,
+                "total_pages": total_pages,
+            }
+        },
+    }
+
+
+def synthetic_customer(i: int) -> Dict[str, Any]:
+    return {
+        "id": i,
+        "name": f"Relatie {i}",
+        "address": f"Laan {i}",
+        "zipcode": f"{2000 + i} CD",
+        "city": "Relatiestad",
+        "email": f"relatie{i}@example.invalid",
+        "phone": f"020-{i:07d}",
+        "mobile": f"06-{i:08d}",
+        "url_show": f"/customer/{i}",
+        "text": f"relatienotitie {i}",
+    }
+
+
+def synthetic_project(i: int) -> Dict[str, Any]:
+    """Projectitem met het genest meegeleverde relatie-object.
+
+    Het geneste object draagt bewust géén ``id``: die bestaat niet in de
+    bron-JSON, dus een koppeling naar ``customer.id`` valt niet te leggen.
+    """
+    return {
+        "id": i,
+        "name": f"Project {i}",
+        "code": f"P-{i:04d}",
+        "status": "actief",
+        "url_show": f"/project/{i}",
+        "customer": {
+            "name": f"Genest bedrijf {i}",
+            "address": f"Nestlaan {i}",
+            "zipcode": f"{3000 + i} EF",
+            "city": "Neststad",
+        },
+    }
+
+
+def _chunk_fractal(
+    rows: List[Dict[str, Any]],
+    *,
+    total: Optional[int],
+    per_page: int,
+) -> Dict[int, Dict[str, Any]]:
+    chunks = [rows[i : i + per_page] for i in range(0, len(rows), per_page)] or [[]]
+    last = len(chunks)
+    claimed_total = len(rows) if total is None else total
+    return {
+        number: fractal_page(
+            data=chunk,
+            current_page=number,
+            total_pages=last,
+            total=claimed_total,
+            per_page=per_page,
+        )
+        for number, chunk in enumerate(chunks, start=1)
+    }
+
+
+def customer_pages(
+    row_count: int,
+    *,
+    total: Optional[int] = None,
+    per_page: int = 50,
+    mutate=None,
+) -> Dict[int, Dict[str, Any]]:
+    """Fractal-paginareeks met ``row_count`` synthetische relaties."""
+    rows = [synthetic_customer(i) for i in range(1, row_count + 1)]
+    if mutate is not None:
+        for row in rows:
+            mutate(row)
+    return _chunk_fractal(rows, total=total, per_page=per_page)
+
+
+def project_pages(
+    row_count: int,
+    *,
+    total: Optional[int] = None,
+    per_page: int = 50,
+    mutate=None,
+) -> Dict[int, Dict[str, Any]]:
+    """Fractal-paginareeks met ``row_count`` synthetische projecten."""
+    rows = [synthetic_project(i) for i in range(1, row_count + 1)]
+    if mutate is not None:
+        for row in rows:
+            mutate(row)
+    return _chunk_fractal(rows, total=total, per_page=per_page)
+
+
+def make_client(transport: Any):
     from simpul_extract.http_client import SimpulClient
 
     return SimpulClient(

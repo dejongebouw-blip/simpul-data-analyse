@@ -146,8 +146,10 @@ class TestShortfallFailsTheRun(unittest.TestCase):
         exit_code = run(
             client=make_client(self._short_transport()),
             writer=InMemoryWriter(),
+            specs=(SUPPLIER_SPEC,),
             run_id="run-short",
             now=TickingClock(),
+            stdout=io.StringIO(),
             stderr=stderr,
         )
         self.assertNotEqual(exit_code, 0)
@@ -177,8 +179,10 @@ class TestCompleteRunSucceeds(unittest.TestCase):
         exit_code = run(
             client=make_client(PagedTransport(supplier_pages(5, per_page=2))),
             writer=InMemoryWriter(),
+            specs=(SUPPLIER_SPEC,),
             run_id="run-ok",
             now=TickingClock(),
+            stdout=io.StringIO(),
             stderr=stderr,
         )
         self.assertEqual(exit_code, 0)
@@ -192,11 +196,12 @@ class TestProcessExitsNonZeroOnShortfall(unittest.TestCase):
     def test_process_exit_code_and_message(self) -> None:
         script = (
             "import sys\n"
-            "from simpul_extract.pipeline import run\n"
+            "from simpul_extract.pipeline import SUPPLIER_SPEC, run\n"
             "from simpul_extract.storage import InMemoryWriter\n"
             "from tests._stubs import PagedTransport, make_client, supplier_pages\n"
             "transport = PagedTransport(supplier_pages(41, total=43, per_page=10))\n"
-            "sys.exit(run(client=make_client(transport), writer=InMemoryWriter()))\n"
+            "sys.exit(run(client=make_client(transport), writer=InMemoryWriter(),\n"
+            "             specs=(SUPPLIER_SPEC,)))\n"
         )
         proc = subprocess.run(
             [sys.executable, "-c", script],
