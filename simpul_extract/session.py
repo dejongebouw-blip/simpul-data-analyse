@@ -29,6 +29,23 @@ REMEMBER_COOKIE_PREFIX = "remember_web_"
 _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 _CSRF_INPUT_RE = re.compile(r'name="_token"\s+value="([^"]*)"')
 
+# De veldnamen van het loginformulier, met de hand overgetypt uit de echte
+# `GET /login` van de bron (2026-08-29):
+#
+#   <input type="hidden" name="_token" ...>
+#   <input type="text"     name="username" placeholder="Gebruikersnaam of e-mailadres">
+#   <input type="password" name="password" ...>
+#   <input type="checkbox" name="remember" value="on">
+#
+# Een eerdere versie postte `email` in plaats van `username`. Laravel zag dan
+# geen gebruikersnaam, weigerde de login, en omdat `_login()` de respons
+# negeerde bleef dat onzichtbaar: de ronde meldde alleen "sessie: dood".
+CSRF_FIELD = "_token"
+USERNAME_FIELD = "username"
+PASSWORD_FIELD = "password"
+REMEMBER_FIELD = "remember"
+REMEMBER_VALUE = "on"
+
 
 class SessionError(Exception):
     """Basisfout van sessiebeheer."""
@@ -76,6 +93,29 @@ def session_is_lost(response):
     if response.status_code == 200:
         return "text/html" in _header(response, "Content-Type")
     return False
+
+
+def describe_response(response):
+    """Beschrijft een respons in termen die een faalmelding mag dragen:
+    statuscode, `Location` en `Content-Type`. Nooit een body, nooit een
+    cookiewaarde, nooit een header met een credential erin."""
+    if response is None:
+        return "geen respons"
+    parts = [f"status {getattr(response, 'status_code', '?')}"]
+    location = _header(response, "Location")
+    if location:
+        parts.append(f"Location {location}")
+    content_type = _header(response, "Content-Type")
+    if content_type:
+        parts.append(f"content-type {content_type}")
+    history = getattr(response, "history", None) or ()
+    if history:
+        first = history[0]
+        parts.append(
+            f"via {getattr(first, 'status_code', '?')} "
+            f"{_header(first, 'Location') or 'zonder Location'}"
+        )
+    return ", ".join(parts)
 
 
 def _apply_cookies(session, cookies):
@@ -131,12 +171,17 @@ class SessionRound:
         self._started = True
 
     def _login(self):
+        """Doet de ene toegestane loginpoging en geeft de POST-respons terug,
+        zodat een mislukking te diagnosticeren is."""
         login_page = self._client.get("/login")
         token = _extract_csrf_token(login_page)
-        self._client.post("/login", data={
-            "_token": token,
-            "email": self._username,
-            "password": self._password,
+        return self._client.post("/login", data={
+            CSRF_FIELD: token,
+            USERNAME_FIELD: self._username,
+            PASSWORD_FIELD: self._password,
+            # De pot draagt `remember_web_*` (PRD en issue 04); Laravel zet die
+            # cookie alleen als het formulier het vinkje meestuurt.
+            REMEMBER_FIELD: REMEMBER_VALUE,
         })
 
     def ensure_live(self, probe_path):
@@ -155,12 +200,14 @@ class SessionRound:
                 "sessie is dood; er is deze ronde al ingelogd, geen tweede poging"
             )
         self._login_attempted = True
-        self._login()
+        login_response = self._login()
 
         response = self._client.get(probe_path)
         if session_is_lost(response):
             raise SessionLostError(
-                "sessie blijft dood na de enige toegestane loginpoging"
+                "sessie blijft dood na de enige toegestane loginpoging; "
+                f"POST /login gaf {describe_response(login_response)}; "
+                f"de probe {probe_path} daarna gaf {describe_response(response)}"
             )
         return response
 
