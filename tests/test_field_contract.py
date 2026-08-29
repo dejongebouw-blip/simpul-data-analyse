@@ -45,7 +45,6 @@ class TestProjectFieldContract(unittest.TestCase):
             "name",
             "status_id",
             "url_show",
-            "invoiceable_amount",
             "project_location",
         )
         self.assertEqual(PROJECT_FIELDS, expected)

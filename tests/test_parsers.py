@@ -105,7 +105,6 @@ class TestParseProjectList(unittest.TestCase):
             "name",
             "status_id",
             "url_show",
-            "invoiceable_amount",
             "project_location",
         ):
             self.assertEqual(row[field], record[field])
@@ -128,16 +127,27 @@ class TestParseProjectList(unittest.TestCase):
         self.assertNotIn("customer", row)
         self.assertNotIn("customer_id", row)
 
-    def test_missing_invoiceable_amount_raises_instead_of_being_dropped(self) -> None:
-        """Tegen-pin op de vorige poging: die sloeg `invoiceable_amount`
-        stilzwijgend over, waardoor analysevraag V3 onbeantwoordbaar werd."""
+    def test_missing_status_id_raises_instead_of_being_dropped(self) -> None:
+        """Tegen-pin: een bronveld dat wegvalt moet de ronde laten vallen, niet
+        stilzwijgend een lege kolom opleveren. Stond eerst op
+        `invoiceable_amount`; dat veld is vervallen omdat de bron het nooit
+        vult en de factuurmodule 403 geeft."""
         record = synthetic_project_record()
-        del record["invoiceable_amount"]
+        del record["status_id"]
 
         with self.assertRaises(MissingFieldError) as ctx:
             parse_project_list([record])
 
-        self.assertIn("invoiceable_amount", str(ctx.exception))
+        self.assertIn("status_id", str(ctx.exception))
+
+    def test_status_id_wordt_als_label_doorgegeven_niet_als_getal(self) -> None:
+        """De bron levert 2793 van 2793 als tekst ('Archief', 'Gesloten', ...).
+        Een parser die hier een int van maakt, breekt op de echte data."""
+        record = synthetic_project_record(status_id="Archief")
+
+        (row,) = parse_project_list([record])
+
+        self.assertEqual(row["status_id"], "Archief")
 
     def test_renaming_project_number_to_code_makes_the_parser_fail(self) -> None:
         """Tegen-pin: de vorige poging vroeg `code` waar de bron

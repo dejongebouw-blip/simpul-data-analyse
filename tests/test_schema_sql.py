@@ -54,7 +54,6 @@ EXPECTED_COLUMNS = {
         "url_show",
         "project_location",
         "status_id",
-        "invoiceable_amount",
         "fetched_at",
     ),
     "supplier": (
@@ -206,6 +205,33 @@ class TestSchemaContract(unittest.TestCase):
         self.assertIn("stored", genormaliseerd)
         self.assertIn("source_total is not null", genormaliseerd)
         self.assertIn("rows_stored = source_total", genormaliseerd)
+
+    def test_projecttypen_volgen_de_bron_niet_de_veldnaam(self) -> None:
+        """Ronde 4 viel op `22P02 invalid input syntax for type integer:
+        "Archief"`. `status_id` heet naar een id maar draagt een label: 2793
+        van 2793 records uit de echte bron zijn tekst, nooit een getal. En
+        `project_location` is geen adres maar een Fractal-object
+        ({"data": []}), dus geen text. Beide typen zijn nagemeten, niet
+        afgeleid uit de naam."""
+        body = _table_body(self.code, "project")
+        regels = {
+            line.strip().split()[0]: line.strip().rstrip(",")
+            for line in body.splitlines()
+            if line.strip() and not line.strip().startswith("--")
+        }
+        self.assertEqual(regels["status_id"], "status_id text")
+        self.assertEqual(regels["project_location"], "project_location jsonb")
+
+    def test_invoiceable_amount_is_geen_kolom_meer(self) -> None:
+        """De bron levert het bedrag null voor alle 2793 projecten, en de
+        factuurmodule geeft dit account 403 op /invoice/invoiceable.json:
+        "Dit heeft te maken met de rechten van uw account." Een kolom die
+        nooit gevuld kan worden hoort niet in de definitie te staan. Komen de
+        rechten er later, dan is de weg een eigen invoice-entiteit."""
+        # Op `code`, niet op `sql`: de kopregels bewaren bewust de geschiedenis
+        # van deze kolom, en die mag een pin op de definitie niet groen of rood
+        # maken.
+        self.assertNotIn("invoiceable_amount", self.code)
 
     def test_bestand_controleert_zelf_op_drift(self) -> None:
         """`create table if not exists` slaat een bestaande, afgedreven tabel

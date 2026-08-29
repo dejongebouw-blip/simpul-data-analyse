@@ -197,10 +197,11 @@ def synthetic_project_record(customer_overrides=None, drop_customer_fields=(), *
         "id": 77001,
         "project_number": "P-77001",
         "name": "Herinrichting tuin",
-        "status_id": 2,
+        # Nagemeten op de echte bron (2026-08-29): status_id draagt een label,
+        # nooit een getal, en project_location is een leeg Fractal-object.
+        "status_id": "Uitvoering",
         "url_show": "/project/77001",
-        "invoiceable_amount": "1234.56",
-        "project_location": "Voorbeeldstraat 1, Voorbeeldstad",
+        "project_location": {"data": []},
         "customer": customer,
     }
     record.update(overrides)

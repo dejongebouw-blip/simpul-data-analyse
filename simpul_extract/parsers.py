@@ -120,13 +120,22 @@ def fetch_customer_emails(client: Any, rows: List[Dict[str, Any]]) -> int:
 
 # ------------------------------------------------------------------- project
 # Bron: GET /project/all.json (2793 rijen, Fractal-paginering, 50/pagina).
+#
+# `invoiceable_amount` stond hier ooit bij, maar de bron levert hem null voor
+# alle 2793 projecten — ook bij status 'Facturabel'. Het bedrag leeft in
+# Simpuls factuurmodule, en die geeft dit account 403 op /invoice,
+# /invoice/invoiceable en /invoice/invoiceable.json: "Dit heeft te maken met
+# de rechten van uw account." Zie adr/2026-08-29-geen-factuurrechten.md.
+#
+# `status_id` heet naar een id maar draagt een label ('Archief', 'Gesloten',
+# 'Facturabel', ...): 2793 van 2793 zijn tekst, nooit een getal.
+# `project_location` is een Fractal-include, altijd het object {"data": []}.
 PROJECT_FIELDS = (
     "id",
     "project_number",
     "name",
     "status_id",
     "url_show",
-    "invoiceable_amount",
     "project_location",
 )
 

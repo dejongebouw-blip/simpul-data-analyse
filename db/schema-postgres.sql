@@ -12,6 +12,10 @@
 -- `extraction_run` een serial in plaats van een identity, drie tabellen hadden
 -- een `default now()` die hier niet stond, en `invoiceable_amount` had live een
 -- precisie. Dat kostte drie extractierondes tegen de echte bron. Een
+-- vierde ronde legde bloot dat de typen ook niet uit de bron kwamen maar uit
+-- de véldnamen: `status_id` heet naar een id en draagt een label, en
+-- `project_location` is een object, geen tekst. Beide zijn nagemeten tegen de
+-- echte bron voordat ze hier kwamen te staan, niet afgeleid uit hun naam. Een
 -- schemabestand dat stil kan afdrijven van de database is geen bron van
 -- waarheid, alleen een gerucht. De driftcontrole hieronder maakt het verschil
 -- luidruchtig: wijkt de database af, dan faalt dit bestand met de kolom erbij.
@@ -60,9 +64,8 @@ create table if not exists simpul_raw.project (
     customer_phone text,
     customer_mobile text,
     url_show text,
-    project_location text,
-    status_id integer,
-    invoiceable_amount numeric(14,2),
+    project_location jsonb,
+    status_id text,
     fetched_at timestamptz default now()
 );
 
@@ -176,10 +179,9 @@ declare
         ['project','customer_city','text','','','f'],
         ['project','customer_phone','text','','','f'],
         ['project','customer_mobile','text','','','f'],
-        ['project','status_id','integer','','','f'],
+        ['project','status_id','text','','','f'],
         ['project','url_show','text','','','f'],
-        ['project','invoiceable_amount','numeric(14,2)','','','f'],
-        ['project','project_location','text','','','f'],
+        ['project','project_location','jsonb','','','f'],
         ['project','fetched_at','timestamp with time zone','','','t'],
         ['supplier','id','bigint','','','f'],
         ['supplier','name','text','','','f'],
