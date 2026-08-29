@@ -190,6 +190,33 @@ class TestSchemaContract(unittest.TestCase):
     def test_no_policy_is_created(self) -> None:
         self.assertNotRegex(self.code, r"create\s+policy")
 
+    def test_complete_is_derived_by_the_database(self) -> None:
+        """`extraction_run.complete` mag niet aanleverbaar zijn. Ronde 3 van
+        2026-08-29 viel op PostgREST-fout 428C9 omdat de schrijflaag deze
+        kolom meestuurde terwijl de database hem afleidt. De voorwaarde staat
+        voluit -- zonder een door de bron gemeld totaal is de ronde niet
+        bevestigd, en dat hoort `false` te zijn en niet NULL, zodat een latere
+        query `= false` mag schrijven in plaats van `is not true`."""
+        body = _table_body(self.code, "extraction_run")
+        regel = next(
+            line for line in body.splitlines() if line.strip().startswith("complete ")
+        )
+        genormaliseerd = " ".join(regel.lower().replace("(", " ").replace(")", " ").split())
+        self.assertIn("generated always as", genormaliseerd)
+        self.assertIn("stored", genormaliseerd)
+        self.assertIn("source_total is not null", genormaliseerd)
+        self.assertIn("rows_stored = source_total", genormaliseerd)
+
+    def test_bestand_controleert_zelf_op_drift(self) -> None:
+        """`create table if not exists` slaat een bestaande, afgedreven tabel
+        stilzwijgend over: het bestand draait dan groen en verandert niets.
+        Dat kostte op 2026-08-29 drie rondes tegen de echte bron. Er hoort dus
+        een controle in te zitten die de werkelijke kolommen tegen de
+        verklaarde legt en met een exception faalt als ze verschillen."""
+        self.assertRegex(self.sql, r"(?is)\bdo\s*\$\$.*\braise\s+exception\b.*\$\$")
+        self.assertIn("pg_attribute", self.sql)
+        self.assertIn("format_type", self.sql)
+
     def test_grants_revoked_for_anon_and_authenticated(self) -> None:
         for statement in REVOKE_STATEMENTS:
             with self.subTest(statement=statement):

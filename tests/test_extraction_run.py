@@ -1,9 +1,15 @@
 """Toetst de auditregel (issue 08): elke ronde schrijft per entiteit één
 regel naar `simpul_raw.extraction_run` — met `run_id`, `started_at`,
-`finished_at`, `entity`, `rows_stored`, `source_total` en `complete` — via
+`finished_at`, `entity`, `rows_stored`, `source_total` en `note` — via
 dezelfde upsert-interface als de entiteitstabellen zelf. De regel wordt ook
-geschreven wanneer de ronde faalt op volledigheid; `complete` staat dan op
-`false`.
+geschreven wanneer de ronde faalt op volledigheid; `note` zegt dan wat er
+misging.
+
+`complete` staat er bewust NIET bij: die kolom is
+`generated always as (source_total is not null and rows_stored =
+source_total) stored`, dus de database rekent hem uit de twee getallen in
+dezelfde rij. Wat de schrijflaag hier wél of niet aanlevert, staat gepind in
+`tests/test_postgrest_seam.py`.
 
 Alles draait op `tests._stubs` en de in-memory nepimplementatie uit issue
 07; er gaat geen verzoek naar een draaiende omgeving.
@@ -68,13 +74,17 @@ class TestAuditregelBijGeslaagdeRonde(unittest.TestCase):
         self.assertEqual(row["entity"], "customer")
         self.assertEqual(row["rows_stored"], 120)
         self.assertEqual(row["source_total"], 120)
-        self.assertIs(row["complete"], True)
+        self.assertIsNone(row["note"], "een volledige ronde heeft niets uit te leggen")
+        self.assertNotIn(
+            "complete", row,
+            "complete is een generated column; aanleveren geeft PostgREST-fout 428C9",
+        )
         self.assertIsNotNone(row["started_at"])
         self.assertIsNotNone(row["finished_at"])
 
 
 class TestAuditregelBijOnvolledigeRonde(unittest.TestCase):
-    def test_wordt_ook_geschreven_als_de_controle_faalt_met_complete_false(self):
+    def test_wordt_ook_geschreven_als_de_controle_faalt_met_een_verklarende_note(self):
         store = InMemoryUpsertStore(now=_CountingClock())
 
         with self.assertRaises(CompletenessError):
@@ -93,7 +103,8 @@ class TestAuditregelBijOnvolledigeRonde(unittest.TestCase):
         (row,) = rows.values()
         self.assertEqual(row["rows_stored"], 900)
         self.assertEqual(row["source_total"], 951)
-        self.assertIs(row["complete"], False)
+        self.assertEqual(row["note"], "900 weggeschreven, bron meldt 951")
+        self.assertNotIn("complete", row)
 
 
 class TestEenRunIdPerRondeDrieRegelsErbij(unittest.TestCase):

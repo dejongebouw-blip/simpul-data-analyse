@@ -54,13 +54,19 @@ def _extraction_run_row(
     entity: str,
     rows_stored: int,
     source_total: Optional[int],
-    complete: bool,
     note: Optional[str],
 ) -> Dict[str, Any]:
     # Géén 'id': `extraction_run.id` is een `bigint generated always as
     # identity` (issue 11), een kolom waar per definitie niet in geschreven
     # mag worden. Postgres vult hem zelf. Eén regel per entiteit per ronde
     # volgt uit `run_id` + `entity`, niet uit een door ons verzonnen sleutel.
+    #
+    # Géén 'complete' om dezelfde reden: die kolom is
+    # `generated always as (source_total is not null and rows_stored =
+    # source_total) stored`. De database rekent hem uit de twee getallen in
+    # deze rij, zodat het vinkje nooit in tegenspraak kan zijn met de
+    # aantallen ernaast. Meesturen levert PostgREST-fout 428C9 op, en dat is
+    # precies wat ronde 3 van 2026-08-29 liet zien.
     return {
         "run_id": run_id,
         "started_at": started_at,
@@ -68,7 +74,6 @@ def _extraction_run_row(
         "entity": entity,
         "rows_stored": rows_stored,
         "source_total": source_total,
-        "complete": complete,
         "note": note,
     }
 
@@ -76,7 +81,8 @@ def _extraction_run_row(
 def write_extraction_run(store: UpsertStore, **kwargs: Any) -> None:
     """Voegt één auditregel toe aan `extraction_run`. Bewust `append()` en
     niet `upsert()`: de tabel heeft een identity-`id` en geen `fetched_at`,
-    dus de upsert-weg werkt hier niet."""
+    dus de upsert-weg werkt hier niet. `complete` gaat niet mee — de database
+    leidt die af; zie `_extraction_run_row`."""
     store.append(EXTRACTION_RUN_TABLE, [_extraction_run_row(**kwargs)])
 
 
@@ -118,6 +124,9 @@ def run_entity_round(
         rows_stored += len(rows)
 
     finished_at = now()
+    # Dezelfde som die `extraction_run.complete` in de database is. Hier
+    # nodig voor `note` en voor de CompletenessError; niet om weg te
+    # schrijven.
     complete = source_total is not None and rows_stored == source_total
     note = None if complete else f"{rows_stored} weggeschreven, bron meldt {source_total}"
 
@@ -129,7 +138,6 @@ def run_entity_round(
         entity=entity,
         rows_stored=rows_stored,
         source_total=source_total,
-        complete=complete,
         note=note,
     )
 

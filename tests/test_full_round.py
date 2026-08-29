@@ -249,7 +249,11 @@ class TestVolledigeRondeOpStubs(unittest.TestCase):
         rows = store.tables[EXTRACTION_RUN_TABLE]
         self.assertEqual(len(rows), 3)
         self.assertTrue(all(row["run_id"] == "run-audit" for row in rows.values()))
-        self.assertTrue(all(row["complete"] is True for row in rows.values()))
+        self.assertTrue(all(row["note"] is None for row in rows.values()))
+        self.assertTrue(
+            all("complete" not in row for row in rows.values()),
+            "complete is een generated column en mag niet aangeleverd worden",
+        )
         self.assertEqual(
             {row["entity"] for row in rows.values()}, {"customer", "project", "supplier"}
         )
@@ -337,16 +341,19 @@ class TestEntiteitOnvolledig(unittest.TestCase):
             "een datafout mag de sessie niet kosten: de cookie moet alsnog terug naar de pot",
         )
 
-    def test_auditregel_van_de_falende_entiteit_staat_op_complete_false(self):
+    def test_auditregel_van_de_falende_entiteit_verklaart_zich_in_note(self):
         _, store, _, _ = _run_round(self._session(), run_id="run-onvolledig")
 
         rows = store.tables[EXTRACTION_RUN_TABLE]
         by_entity = {row["entity"]: row for row in rows.values()}
-        self.assertIs(by_entity["supplier"]["complete"], False)
+        self.assertEqual(by_entity["supplier"]["note"], "4 weggeschreven, bron meldt 5")
         self.assertEqual(by_entity["supplier"]["rows_stored"], 4)
         self.assertEqual(by_entity["supplier"]["source_total"], 5)
-        self.assertIs(by_entity["customer"]["complete"], True)
-        self.assertIs(by_entity["project"]["complete"], True)
+        self.assertIsNone(by_entity["customer"]["note"])
+        self.assertIsNone(by_entity["project"]["note"])
+        # De database leidt `complete` af uit rows_stored en source_total; de
+        # aantallen hierboven zijn dus tegelijk de pin op wat daar komt te staan.
+        self.assertTrue(all("complete" not in row for row in rows.values()))
 
     def test_andere_entiteiten_zijn_nog_steeds_correct_weggeschreven(self):
         _, store, _, _ = _run_round(self._session())

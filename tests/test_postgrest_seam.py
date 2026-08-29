@@ -200,14 +200,24 @@ if __name__ == "__main__":
     unittest.main()
 
 
-# Letterlijk uit issue 11: `id` bigint **generated always as identity** primary
-# key; `run_id` uuid; `started_at`, `finished_at` timestamptz; `entity` text;
-# `rows_stored`, `source_total` integer; `complete` boolean; `note` text.
+# De kolommen die de schrijflaag mág aanleveren, met de hand overgetypt uit
+# `db/schema-postgres.sql`: `run_id` uuid; `started_at`, `finished_at`
+# timestamptz; `entity` text; `rows_stored`, `source_total` integer; `note`
+# text.
+#
+# Twee kolommen van de tabel staan hier bewust NIET in, want ze zijn niet
+# aanleverbaar. `id` is `bigint generated always as identity`. En `complete` is
+# `generated always as (source_total is not null and rows_stored =
+# source_total) stored`: de database rekent het vinkje uit de twee getallen in
+# dezelfde rij. Ronde 3 van 2026-08-29 viel op precies dat verschil, met
+# PostgREST-fout 428C9 — en de eerdere kolomvergelijking zag het niet, omdat
+# een generated column gewoon in de OpenAPI-kolomlijst staat.
+#
 # Geen `fetched_at` — issue 11 zondert extraction_run en session_cookie daar
 # expliciet van uit.
 EXTRACTION_RUN_COLUMNS = (
     "run_id", "started_at", "finished_at", "entity",
-    "rows_stored", "source_total", "complete", "note",
+    "rows_stored", "source_total", "note",
 )
 
 
@@ -229,7 +239,6 @@ class TestAuditregelNaarDeEchteTabel(unittest.TestCase):
             "entity": "customer",
             "rows_stored": 951,
             "source_total": 951,
-            "complete": True,
             "note": None,
         }])
         (call,) = [c for c in session.calls if c["method"] == "POST"]
@@ -242,6 +251,10 @@ class TestAuditregelNaarDeEchteTabel(unittest.TestCase):
     def test_plakt_geen_fetched_at_op_een_tabel_die_die_kolom_niet_heeft(self):
         (rij,) = self._append_call()["json"]
         self.assertNotIn("fetched_at", rij)
+
+    def test_stuurt_geen_complete_want_de_database_leidt_die_af(self):
+        (rij,) = self._append_call()["json"]
+        self.assertNotIn("complete", rij)
 
     def test_stuurt_precies_de_kolommen_uit_issue_11(self):
         (rij,) = self._append_call()["json"]
@@ -283,7 +296,6 @@ class TestWriteExtractionRunTegenDeEchteSchrijflaag(unittest.TestCase):
             entity="customer",
             rows_stored=951,
             source_total=951,
-            complete=True,
             note=None,
         )
         (call,) = [c for c in session.calls if c["method"] == "POST"]
@@ -296,6 +308,13 @@ class TestWriteExtractionRunTegenDeEchteSchrijflaag(unittest.TestCase):
     def test_de_auditregel_draagt_geen_fetched_at(self):
         (rij,) = self._post()["json"]
         self.assertNotIn("fetched_at", rij)
+
+    def test_de_auditregel_draagt_geen_complete(self):
+        """Dit is de toets die ronde 3 had bespaard. `complete` is een
+        generated column; meesturen levert PostgREST-fout 428C9 op en gooit
+        het volledige ophaalwerk van die ronde weg."""
+        (rij,) = self._post()["json"]
+        self.assertNotIn("complete", rij)
 
     def test_de_auditregel_draagt_precies_de_kolommen_uit_issue_11(self):
         (rij,) = self._post()["json"]

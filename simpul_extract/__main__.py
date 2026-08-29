@@ -177,6 +177,9 @@ def run(
         store.upsert(entity.table, rows)
         rows_stored = len(rows)
         source_total = data["source_total"]
+        # Dezelfde som die `extraction_run.complete` in de database is: die
+        # kolom is generated, dus hij gaat niet mee in de auditregel. Hier
+        # nodig voor `note`, het slotoverzicht en de exitcode.
         complete = source_total is not None and rows_stored == source_total
         if not complete:
             incomplete = True
@@ -190,7 +193,6 @@ def run(
             entity=entity.name,
             rows_stored=rows_stored,
             source_total=source_total,
-            complete=complete,
             note=note,
         )
         logger.info(
