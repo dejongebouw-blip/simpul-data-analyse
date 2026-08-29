@@ -1,5 +1,7 @@
 """Netwerkloze stubs voor de HTTP-laag testen: geen enkel verzoek verlaat het proces."""
 
+import json
+
 
 class StubResponse:
     def __init__(self, status_code, body="", headers=None, set_cookies=None):
@@ -9,6 +11,10 @@ class StubResponse:
         # Cookies die een echte requests.Session automatisch uit de
         # Set-Cookie-header in zijn cookiejar zou overnemen na dit antwoord.
         self.set_cookies = set_cookies or {}
+
+    def json(self):
+        """Zoals requests.Response.json(): parseert `text` als JSON."""
+        return json.loads(self.text)
 
 
 class StubSession:
@@ -60,3 +66,103 @@ class StubCookiePot:
     def write(self, cookies):
         self.write_calls.append(dict(cookies))
         self._cookies = dict(cookies)
+
+
+class PagedSession(StubSession):
+    """Serveert vooraf gebouwde pagineerpagina's (Fractal of Laravel) op
+    ``?page=N``, voor pagineringstoetsen (issue 05). Net als `StubSession`
+    registreert ze elk verzoek zonder netwerk aan te raken."""
+
+    def __init__(self, pages, path=None):
+        super().__init__()
+        self._pages = dict(pages)
+        self._path = path
+
+    def request(self, method, url, params=None, data=None):
+        query = dict(params or {})
+        self.calls.append({"method": method, "url": url, "params": query, "data": data})
+        if self._path is not None and self._path not in url:
+            raise AssertionError(f"onverwacht pad: {url}; verwacht {self._path}")
+        page = int(query.get("page", 1))
+        if page not in self._pages:
+            raise AssertionError(
+                f"onverwachte paginavraag: page={page}; beschikbaar: {sorted(self._pages)}"
+            )
+        response = StubResponse(200, json.dumps(self._pages[page]))
+        self.cookies.update(response.set_cookies)
+        return response
+
+    def requested_pages(self):
+        return [int(call["params"].get("page", 1)) for call in self.calls]
+
+
+def fractal_page(*, data, current_page, total_pages, total, per_page=50):
+    return {
+        "data": list(data),
+        "meta": {
+            "pagination": {
+                "total": total,
+                "count": len(data),
+                "per_page": per_page,
+                "current_page": current_page,
+                "total_pages": total_pages,
+            }
+        },
+    }
+
+
+def laravel_page(*, data, current_page, last_page, total, per_page=50):
+    return {
+        "current_page": current_page,
+        "data": list(data),
+        "last_page": last_page,
+        "per_page": per_page,
+        "total": total,
+    }
+
+
+def _chunked_pages(rows, *, total, per_page, build_page):
+    chunks = [rows[i : i + per_page] for i in range(0, len(rows), per_page)] or [[]]
+    last = len(chunks)
+    claimed_total = len(rows) if total is None else total
+    return {
+        number: build_page(chunk, current_page=number, last=last, total=claimed_total)
+        for number, chunk in enumerate(chunks, start=1)
+    }
+
+
+def fractal_rows_pages(row_count, *, total=None, per_page=50, start_id=1):
+    """Fractal-paginareeks (``meta.pagination``) met ``row_count`` rijen,
+    elk enkel een ``id`` (veldnaam-onafhankelijk, zoals deze naad vereist)."""
+    rows = [{"id": i} for i in range(start_id, start_id + row_count)]
+    return _chunked_pages(
+        rows,
+        total=total,
+        per_page=per_page,
+        build_page=lambda chunk, current_page, last, total: fractal_page(
+            data=chunk, current_page=current_page, total_pages=last, total=total, per_page=per_page
+        ),
+    )
+
+
+def laravel_rows_pages(row_count, *, total=None, per_page=50, start_id=1):
+    """Laravel-paginatorreeks met ``row_count`` rijen, elk enkel een ``id``."""
+    rows = [{"id": i} for i in range(start_id, start_id + row_count)]
+    return _chunked_pages(
+        rows,
+        total=total,
+        per_page=per_page,
+        build_page=lambda chunk, current_page, last, total: laravel_page(
+            data=chunk, current_page=current_page, last_page=last, total=total, per_page=per_page
+        ),
+    )
+
+
+def make_paginate_client(pages, path=None):
+    """Bouwt een SimpulHTTPClient bovenop een `PagedSession`, zonder netwerk
+    en zonder echte pauzes."""
+    from simpul_extract.http_client import SimpulHTTPClient
+
+    session = PagedSession(pages, path=path)
+    client = SimpulHTTPClient(session, delay=0.0, sleep=lambda seconds: None)
+    return client, session
