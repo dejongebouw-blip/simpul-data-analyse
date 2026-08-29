@@ -1,0 +1,26 @@
+# Runtime-data (nooit in git; contract van issue 01)
+data/
+*.sqlite
+*.sqlite-journal
+
+# Secrets (nooit in git; contract van issue 01)
+.env
+.env.*
+
+# Python bijproducten
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

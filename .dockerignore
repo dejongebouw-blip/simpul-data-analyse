@@ -1,0 +1,36 @@
+# Runtime-data
+data/
+*.sqlite
+*.sqlite-journal
+
+# Secrets
+.env
+.env.*
+
+# Versiebeheer
+.git/
+.gitignore
+.gitattributes
+
+# Testinfrastructuur en testfixtures horen niet in het image;
+# de host-runner mount tests/ read-only op /app/tests wanneer nodig.
+tests/
+tests/fixtures/
+
+# Python bijproducten
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
