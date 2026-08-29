@@ -1,0 +1,186 @@
+"""Sessiebeheer voor Simpul (adr/2026-08-29-job-logt-zelf-in.md).
+
+Volgorde per ronde:
+  1. Lees de cookiepot bij de start en injecteer `__Host-s`, `remember_web_*`
+     en `XSRF-TOKEN` in de HTTP-sessie.
+  2. Bewijs met een verzoek dat de sessie leeft. Blijkt ze dood — een
+     redirect naar /login, of een 200 met text/html waar JSON verwacht
+     wordt — dan wordt er precies één keer ingelogd: GET /login voor het
+     CSRF-token, POST /login met de credentials.
+  3. Weigert de sessie ook na die ene poging, dan stopt de ronde met
+     EXIT_SESSION_LOST en wordt er niets naar de pot geschreven. Er volgt
+     geen tweede loginpoging binnen dezelfde ronde.
+  4. Slaagt de ronde, dan gaat de (door Laravel mogelijk geroteerde)
+     cookiewaarde terug naar de pot.
+
+Geen cookiewaarde en geen wachtwoord wordt ooit in een foutmelding
+geformatteerd.
+"""
+
+import re
+
+EXIT_OK = 0
+EXIT_SESSION_LOST = 2
+
+SESSION_COOKIE_NAME = "__Host-s"
+XSRF_COOKIE_NAME = "XSRF-TOKEN"
+REMEMBER_COOKIE_PREFIX = "remember_web_"
+
+_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+_CSRF_INPUT_RE = re.compile(r'name="_token"\s+value="([^"]*)"')
+
+
+class SessionError(Exception):
+    """Basisfout van sessiebeheer."""
+
+
+class SessionLostError(SessionError):
+    """De sessie is dood en kon niet worden hersteld via de ene toegestane
+    loginpoging."""
+
+
+class CookiePot:
+    """Injecteerbare potinterface voor de sessiecookies.
+
+    Concrete implementaties (bijv. tegen `simpul_raw.session_cookie`) en
+    teststubs voldoen hieraan door `read()`/`write()` te implementeren; er
+    is verder geen contractcontrole nodig omdat Python duck-typet.
+    """
+
+    def read(self):
+        raise NotImplementedError
+
+    def write(self, cookies):
+        raise NotImplementedError
+
+
+def _is_tracked_cookie(name):
+    return (
+        name == SESSION_COOKIE_NAME
+        or name == XSRF_COOKIE_NAME
+        or name.startswith(REMEMBER_COOKIE_PREFIX)
+    )
+
+
+def _header(response, name):
+    headers = getattr(response, "headers", None) or {}
+    return headers.get(name, "")
+
+
+def session_is_lost(response):
+    """True als `response` sessieverlies aantoont: een redirect naar /login,
+    of een 200 met content-type text/html waar JSON verwacht wordt. Dat
+    laatste telt expliciet als sessieverlies, niet als een lege pagina."""
+    if response.status_code in _REDIRECT_STATUSES:
+        return "/login" in _header(response, "Location")
+    if response.status_code == 200:
+        return "text/html" in _header(response, "Content-Type")
+    return False
+
+
+def _apply_cookies(session, cookies):
+    for name, value in cookies.items():
+        session.cookies[name] = value
+
+
+def _read_tracked_cookies(session):
+    return {
+        name: value
+        for name, value in dict(session.cookies).items()
+        if _is_tracked_cookie(name)
+    }
+
+
+def _extract_csrf_token(login_page):
+    match = _CSRF_INPUT_RE.search(login_page.text or "")
+    if not match:
+        raise SessionError("kon geen CSRF-token vinden op de loginpagina")
+    return match.group(1)
+
+
+def credentials_from_env(env):
+    """Leest SIMPUL_USERNAME/SIMPUL_PASSWORD uit `env` (bijv. os.environ)."""
+    username = env.get("SIMPUL_USERNAME")
+    password = env.get("SIMPUL_PASSWORD")
+    if not username or not password:
+        raise SessionError(
+            "SIMPUL_USERNAME en SIMPUL_PASSWORD zijn beide vereist om in te loggen"
+        )
+    return username, password
+
+
+class SessionRound:
+    """Beheert de sessie voor één ronde.
+
+    `client` is een SimpulHTTPClient; `session` is de onderliggende
+    HTTP-sessie waar `client` cookies op leest en zet.
+    """
+
+    def __init__(self, client, session, pot, username, password):
+        self._client = client
+        self._session = session
+        self._pot = pot
+        self._username = username
+        self._password = password
+        self._login_attempted = False
+        self._started = False
+
+    def start(self):
+        """Leest de cookiepot en injecteert de cookies in de sessie."""
+        _apply_cookies(self._session, self._pot.read())
+        self._started = True
+
+    def _login(self):
+        login_page = self._client.get("/login")
+        token = _extract_csrf_token(login_page)
+        self._client.post("/login", data={
+            "_token": token,
+            "email": self._username,
+            "password": self._password,
+        })
+
+    def ensure_live(self, probe_path):
+        """Bewijst met een verzoek naar `probe_path` dat de sessie leeft.
+        Blijkt ze dood, dan wordt precies één keer ingelogd. Blijft de
+        sessie ook daarna dood, dan wordt SessionLostError geworpen."""
+        if not self._started:
+            raise SessionError("start() moet aangeroepen zijn voor ensure_live()")
+
+        response = self._client.get(probe_path)
+        if not session_is_lost(response):
+            return response
+
+        if self._login_attempted:
+            raise SessionLostError(
+                "sessie is dood; er is deze ronde al ingelogd, geen tweede poging"
+            )
+        self._login_attempted = True
+        self._login()
+
+        response = self._client.get(probe_path)
+        if session_is_lost(response):
+            raise SessionLostError(
+                "sessie blijft dood na de enige toegestane loginpoging"
+            )
+        return response
+
+    def finish(self):
+        """Schrijft de (mogelijk geroteerde) cookiewaarde terug naar de pot."""
+        self._pot.write(_read_tracked_cookies(self._session))
+
+
+def run_round(client, session, pot, probe_path, username, password):
+    """Voert de sessiestap van een ronde uit end-to-end.
+
+    Retourneert EXIT_OK als de sessie leefde of via de ene toegestane login
+    hersteld is — de pot is dan bijgewerkt. Retourneert EXIT_SESSION_LOST
+    als die ene poging niet volstond — de pot is dan niet aangeraakt.
+    """
+    round_ = SessionRound(client, session, pot, username, password)
+    round_.start()
+    try:
+        round_.ensure_live(probe_path)
+    except SessionLostError:
+        return EXIT_SESSION_LOST
+    round_.finish()
+    return EXIT_OK
