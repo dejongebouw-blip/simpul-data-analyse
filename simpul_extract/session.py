@@ -203,13 +203,22 @@ class SessionRound:
         login_response = self._login()
 
         response = self._client.get(probe_path)
-        if session_is_lost(response):
-            raise SessionLostError(
-                "sessie blijft dood na de enige toegestane loginpoging; "
-                f"POST /login gaf {describe_response(login_response)}; "
-                f"de probe {probe_path} daarna gaf {describe_response(response)}"
-            )
-        return response
+        if not session_is_lost(response):
+            # De sessie is duur: één loginpoging per ronde
+            # (adr/2026-08-29-job-logt-zelf-in.md). Leg haar meteen vast, niet
+            # pas in finish(). Een ronde duurt een half uur tot drie kwartier
+            # en schrijft de data pas aan het eind; valt ze daarvóór om, dan
+            # was de zojuist gewonnen sessie anders weg en kostte de volgende
+            # ronde opnieuw een login. Aangetoond op 2026-08-29: H6 crashte op
+            # de auditregel en liet de pot leeg achter.
+            self._pot.write(_read_tracked_cookies(self._session))
+            return response
+
+        raise SessionLostError(
+            "sessie blijft dood na de enige toegestane loginpoging; "
+            f"POST /login gaf {describe_response(login_response)}; "
+            f"de probe {probe_path} daarna gaf {describe_response(response)}"
+        )
 
     def finish(self):
         """Schrijft de (mogelijk geroteerde) cookiewaarde terug naar de pot."""

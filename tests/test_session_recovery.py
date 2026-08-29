@@ -66,7 +66,12 @@ class TestSessionRecovery(unittest.TestCase):
             _count_login_posts(session), 1,
             "een dode sessie moet precies één loginpoging uitlokken",
         )
-        self.assertEqual(pot.write_calls, [ROTATED_COOKIES])
+        # Twee schrijfacties, allebei met de geroteerde cookies: één zodra de
+        # login slaagde (de sessie is duur en mag niet verloren gaan als de
+        # ronde later omvalt) en één bij finish(). Vóór 2026-08-29 was dit er
+        # één, aan het eind; zie tests/test_login_post_contract.py.
+        self.assertEqual(pot.write_calls, [ROTATED_COOKIES, ROTATED_COOKIES])
+        self.assertEqual(pot.read(), ROTATED_COOKIES)
 
     def test_200_met_html_waar_json_verwacht_wordt_telt_als_sessieverlies(self):
         session = StubSession(responses=[

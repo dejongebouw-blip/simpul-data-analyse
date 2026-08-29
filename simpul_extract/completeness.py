@@ -57,11 +57,11 @@ def _extraction_run_row(
     complete: bool,
     note: Optional[str],
 ) -> Dict[str, Any]:
-    # De generieke upsert-interface (issue 07) vereist een 'id' per rij; de
-    # combinatie run_id+entity is de natuurlijke sleutel voor één auditregel
-    # per entiteit per ronde ("Eén run_id per ronde, drie regels erbij").
+    # Géén 'id': `extraction_run.id` is een `bigint generated always as
+    # identity` (issue 11), een kolom waar per definitie niet in geschreven
+    # mag worden. Postgres vult hem zelf. Eén regel per entiteit per ronde
+    # volgt uit `run_id` + `entity`, niet uit een door ons verzonnen sleutel.
     return {
-        "id": f"{run_id}:{entity}",
         "run_id": run_id,
         "started_at": started_at,
         "finished_at": finished_at,
@@ -74,9 +74,10 @@ def _extraction_run_row(
 
 
 def write_extraction_run(store: UpsertStore, **kwargs: Any) -> None:
-    """Schrijft één auditregel naar `extraction_run`, via dezelfde
-    upsert-interface als de entiteitstabellen."""
-    store.upsert(EXTRACTION_RUN_TABLE, [_extraction_run_row(**kwargs)])
+    """Voegt één auditregel toe aan `extraction_run`. Bewust `append()` en
+    niet `upsert()`: de tabel heeft een identity-`id` en geen `fetched_at`,
+    dus de upsert-weg werkt hier niet."""
+    store.append(EXTRACTION_RUN_TABLE, [_extraction_run_row(**kwargs)])
 
 
 def run_entity_round(

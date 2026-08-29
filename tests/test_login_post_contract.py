@@ -207,3 +207,54 @@ class TestDescribeResponse(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPotDirectNaDeLogin(unittest.TestCase):
+    """De sessie is duur (één loginpoging per ronde). Ze wordt daarom meteen
+    na een geslaagde login vastgelegd, niet pas bij finish() aan het eind van
+    een ronde die een half uur duurt en pas op het laatst wegschrijft."""
+
+    def test_een_geslaagde_login_schrijft_de_pot_meteen(self):
+        round_, session = _ronde(
+            login_post_response=StubResponse(
+                302, headers={"Location": "/customer"},
+                set_cookies={"__Host-s": "verse-s-waarde"},
+            ),
+            tweede_probe_response=StubResponse(
+                200, body="[]", headers={"Content-Type": "application/json"}
+            ),
+        )
+        pot = round_._pot
+
+        round_.ensure_live("/customer/all.json")
+
+        self.assertEqual(
+            len(pot.write_calls), 1,
+            "de pot moet geschreven zijn zodra de login slaagde, niet pas bij finish()",
+        )
+        self.assertEqual(pot.write_calls[0].get("__Host-s"), "verse-s-waarde")
+
+    def test_een_levende_sessie_schrijft_niet_tussentijds(self):
+        """Zonder login is er niets nieuws vast te leggen; finish() doet de
+        rotatie aan het eind."""
+        session = StubSession(responses=[
+            StubResponse(200, body="[]", headers={"Content-Type": "application/json"}),
+        ])
+        client = SimpulHTTPClient(session, sleep=lambda s: None)
+        pot = StubCookiePot(initial=INITIAL_COOKIES)
+        round_ = SessionRound(client, session, pot, GEBRUIKERSNAAM, GEHEIM_WACHTWOORD)
+        round_.start()
+
+        round_.ensure_live("/customer/all.json")
+
+        self.assertEqual(pot.write_calls, [])
+
+    def test_een_mislukte_login_schrijft_nog_steeds_niets(self):
+        """De bestaande grens blijft staan: een dode sessie raakt de pot niet."""
+        round_, _ = _mislukte_ronde()
+        pot = round_._pot
+
+        with self.assertRaises(SessionLostError):
+            round_.ensure_live("/customer/all.json")
+
+        self.assertEqual(pot.write_calls, [])

@@ -55,6 +55,18 @@ class UpsertStore:
     def upsert(self, table: str, rows: Sequence[Mapping[str, Any]]) -> UpsertResult:
         raise NotImplementedError
 
+    def append(self, table: str, rows: Sequence[Mapping[str, Any]]) -> UpsertResult:
+        """Voegt rijen toe aan een tabel die géén `id` van ons krijgt en géén
+        `fetched_at` draagt — de auditlog `extraction_run` (issue 11: `id`
+        bigint *generated always as identity*, en expliciet geen `fetched_at`).
+
+        Een auditregel is een toevoeging, geen upsert: er is niets om op te
+        conflicteren. `upsert()` gebruiken brak hier tweemaal tegelijk — het
+        stuurde een tekstsleutel naar een identity-kolom én een `fetched_at`
+        die de tabel niet heeft.
+        """
+        raise NotImplementedError
+
 
 class InMemoryUpsertStore(UpsertStore):
     """In-memory nepimplementatie: geen Postgres, geen netwerk.
@@ -71,6 +83,18 @@ class InMemoryUpsertStore(UpsertStore):
     def __init__(self, now: Callable[[], str] = _default_now):
         self._now = now
         self.tables: Dict[str, Dict[Any, Dict[str, Any]]] = {}
+        self._next_identity: Dict[str, int] = {}
+
+    def append(self, table: str, rows: Sequence[Mapping[str, Any]]) -> UpsertResult:
+        """Bootst de identity-kolom na: elke rij krijgt een oplopend geheel
+        getal als sleutel, precies zoals Postgres dat doet. De rij zelf blijft
+        onaangeraakt — geen `id`, geen `fetched_at`."""
+        existing = self.tables.setdefault(table, {})
+        for row in rows:
+            volgnummer = self._next_identity.get(table, 1)
+            self._next_identity[table] = volgnummer + 1
+            existing[volgnummer] = dict(row)
+        return UpsertResult(inserted=len(rows), updated=0)
 
     def upsert(self, table: str, rows: Sequence[Mapping[str, Any]]) -> UpsertResult:
         existing = self.tables.setdefault(table, {})
@@ -149,6 +173,27 @@ class PostgrestUpsertStore(UpsertStore):
         )
         response.raise_for_status()
         return UpsertResult(inserted=len(payload), updated=0)
+
+    def append(self, table: str, rows: Sequence[Mapping[str, Any]]) -> UpsertResult:
+        """Platte insert: geen `on_conflict`, geen `resolution=merge-
+        duplicates` en géén toegevoegde `fetched_at`. Postgres vult de
+        identity-kolom zelf."""
+        if not rows:
+            return UpsertResult(inserted=0, updated=0)
+
+        response = self._session.post(
+            f"{self._base_url}/{table}",
+            json=[dict(row) for row in rows],
+            headers={
+                "apikey": self._api_key,
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+                "Content-Profile": SCHEMA,
+                "Prefer": "return=minimal",
+            },
+        )
+        response.raise_for_status()
+        return UpsertResult(inserted=len(rows), updated=0)
 
 
 REST_PATH = "/rest/v1"

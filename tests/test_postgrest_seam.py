@@ -194,3 +194,110 @@ class TestCookiePotKolomcontract(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Letterlijk uit issue 11: `id` bigint **generated always as identity** primary
+# key; `run_id` uuid; `started_at`, `finished_at` timestamptz; `entity` text;
+# `rows_stored`, `source_total` integer; `complete` boolean; `note` text.
+# Geen `fetched_at` — issue 11 zondert extraction_run en session_cookie daar
+# expliciet van uit.
+EXTRACTION_RUN_COLUMNS = (
+    "run_id", "started_at", "finished_at", "entity",
+    "rows_stored", "source_total", "complete", "note",
+)
+
+
+class TestAuditregelNaarDeEchteTabel(unittest.TestCase):
+    """De ronde van 2026-08-29 haalde 951 relaties binnen en viel toen om met
+    HTTP 400 op `extraction_run`: `upsert()` stuurde een tekst-`id` naar een
+    identity-kolom én een `fetched_at` die de tabel niet heeft. Beide fouten
+    waren onzichtbaar omdat elke toets tot dan een in-memory store gebruikte."""
+
+    def _append_call(self):
+        session = _RecordingSession()
+        store = PostgrestUpsertStore(
+            postgrest_base_url(PROJECT_URL), "sleutel", session=session, now=lambda: "2026-08-29T00:00:00+00:00"
+        )
+        store.append("extraction_run", [{
+            "run_id": "0123456789abcdef0123456789abcdef",
+            "started_at": "2026-08-29T21:20:00+00:00",
+            "finished_at": "2026-08-29T21:29:00+00:00",
+            "entity": "customer",
+            "rows_stored": 951,
+            "source_total": 951,
+            "complete": True,
+            "note": None,
+        }])
+        (call,) = [c for c in session.calls if c["method"] == "POST"]
+        return call
+
+    def test_stuurt_geen_id_want_de_kolom_is_generated_always(self):
+        (rij,) = self._append_call()["json"]
+        self.assertNotIn("id", rij)
+
+    def test_plakt_geen_fetched_at_op_een_tabel_die_die_kolom_niet_heeft(self):
+        (rij,) = self._append_call()["json"]
+        self.assertNotIn("fetched_at", rij)
+
+    def test_stuurt_precies_de_kolommen_uit_issue_11(self):
+        (rij,) = self._append_call()["json"]
+        self.assertEqual(set(rij), set(EXTRACTION_RUN_COLUMNS))
+
+    def test_gebruikt_geen_on_conflict_want_een_auditregel_is_een_toevoeging(self):
+        call = self._append_call()
+        self.assertFalse(call.get("params"))
+        self.assertNotIn("merge-duplicates", call["headers"].get("Prefer", ""))
+
+    def test_schrijft_naar_het_schema_simpul_raw_op_het_rest_pad(self):
+        call = self._append_call()
+        self.assertEqual(call["url"], f"{PROJECT_URL}/rest/v1/extraction_run")
+        self.assertEqual(call["headers"]["Content-Profile"], "simpul_raw")
+
+
+class TestWriteExtractionRunTegenDeEchteSchrijflaag(unittest.TestCase):
+    """Pint de sámenstelling, niet de losse laag: wat `write_extraction_run`
+    werkelijk over de lijn zet als de store de echte PostgREST-store is.
+
+    De naadtoetsen hierboven roepen `append()` rechtstreeks aan en zouden dus
+    groen blijven als `write_extraction_run` weer `upsert()` ging gebruiken —
+    precies de fout van 2026-08-29. Deze toets sluit die weg af.
+    """
+
+    def _post(self):
+        from simpul_extract.completeness import write_extraction_run
+
+        session = _RecordingSession()
+        store = PostgrestUpsertStore(
+            postgrest_base_url(PROJECT_URL), "sleutel", session=session,
+            now=lambda: "2026-08-29T00:00:00+00:00",
+        )
+        write_extraction_run(
+            store,
+            run_id="0123456789abcdef0123456789abcdef",
+            started_at="2026-08-29T21:20:00+00:00",
+            finished_at="2026-08-29T21:29:00+00:00",
+            entity="customer",
+            rows_stored=951,
+            source_total=951,
+            complete=True,
+            note=None,
+        )
+        (call,) = [c for c in session.calls if c["method"] == "POST"]
+        return call
+
+    def test_de_auditregel_draagt_geen_id(self):
+        (rij,) = self._post()["json"]
+        self.assertNotIn("id", rij)
+
+    def test_de_auditregel_draagt_geen_fetched_at(self):
+        (rij,) = self._post()["json"]
+        self.assertNotIn("fetched_at", rij)
+
+    def test_de_auditregel_draagt_precies_de_kolommen_uit_issue_11(self):
+        (rij,) = self._post()["json"]
+        self.assertEqual(set(rij), set(EXTRACTION_RUN_COLUMNS))
+
+    def test_er_gaat_geen_on_conflict_mee(self):
+        call = self._post()
+        self.assertFalse(call.get("params"))
+        self.assertNotIn("merge-duplicates", call["headers"].get("Prefer", ""))
