@@ -158,6 +158,73 @@ def laravel_rows_pages(row_count, *, total=None, per_page=50, start_id=1):
     )
 
 
+def synthetic_customer_record(**overrides):
+    """Eén record zoals `/customer/all.json` het levert (issue 06 —
+    veldnamen letterlijk uit de inventaris, waarden verzonnen)."""
+    record = {
+        "id": 32475,
+        "customer_number": "K-32475",
+        "title": "Voorbeeld Groenvoorziening B.V.",
+        "address": "Voorbeeldstraat 1",
+        "zipcode": "1234 AB",
+        "city": "Voorbeeldstad",
+        "phone": "010-1234567",
+        "mobile": "06-12345678",
+        "display_status": "actief",
+        "tasks_status": "geen",
+        "url_show": "/customer/32475",
+    }
+    record.update(overrides)
+    return record
+
+
+def synthetic_project_record(customer_overrides=None, drop_customer_fields=(), **overrides):
+    """Eén record zoals `/project/all.json` het levert, inclusief het geneste
+    `customer`-object (issue 06)."""
+    customer = {
+        "title": "Voorbeeld Groenvoorziening B.V.",
+        "address": "Voorbeeldstraat 1",
+        "zipcode": "1234 AB",
+        "city": "Voorbeeldstad",
+        "phone": "010-1234567",
+        "mobile": "06-12345678",
+    }
+    for field in drop_customer_fields:
+        customer.pop(field, None)
+    if customer_overrides:
+        customer.update(customer_overrides)
+    record = {
+        "id": 77001,
+        "project_number": "P-77001",
+        "name": "Herinrichting tuin",
+        "status_id": 2,
+        "url_show": "/project/77001",
+        "invoiceable_amount": "1234.56",
+        "project_location": "Voorbeeldstraat 1, Voorbeeldstad",
+        "customer": customer,
+    }
+    record.update(overrides)
+    return record
+
+
+def synthetic_supplier_record(**overrides):
+    """Eén record zoals `/supplier.json` het levert (issue 06)."""
+    record = {
+        "id": 501,
+        "name": "Groenleverancier B.V.",
+        "zipcode": "5678 CD",
+        "city": "Andersstad",
+        "email": "info@groenleverancier.example",
+        "phone": "020-7654321",
+        "mobile": "06-87654321",
+        "address": "Leverancierslaan 9",
+        "url_show": "/supplier/501",
+        "text": "Vaste leverancier plantmateriaal.",
+    }
+    record.update(overrides)
+    return record
+
+
 def make_paginate_client(pages, path=None):
     """Bouwt een SimpulHTTPClient bovenop een `PagedSession`, zonder netwerk
     en zonder echte pauzes."""
