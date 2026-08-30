@@ -451,3 +451,217 @@ class TestBronLevertEenProjectDubbel(unittest.TestCase):
         overzicht = stdout.getvalue()
         self.assertIn("project: gevonden 4, gemeld 4, 1 dubbel geleverd (ok)", overzicht)
         self.assertIn("customer: gevonden 3, gemeld 3 (ok)", overzicht)
+
+
+def _volledige_sessie():
+    return FullRoundSession(
+        customer_pages=_fractal_pages(_customer_records(), per_page=2),
+        project_pages=_fractal_pages(_project_records(), per_page=2),
+        supplier_pages=_laravel_pages(_supplier_records(), per_page=3),
+        customer_details=_customer_details(),
+        probe_live=True,
+        cookies=INITIAL_COOKIES,
+    )
+
+
+class TestVerwijderdetectieOverMeerdereRondes(unittest.TestCase):
+    """Toetst de markeerstap (issue 03) op de naad van `run()`: twee of drie
+    opeenvolgende aanroepen op dezelfde store, zoals scenario's 1, 3, 4 en 5
+    uit de Testing Decisions van het PRD beschrijven."""
+
+    def test_verdwenen_rij_wordt_gemarkeerd_maar_blijft_bestaan(self):
+        """Scenario 1: een rij die niet meer geleverd wordt in een verder
+        volledige ronde krijgt `missing_since`, de rij zelf blijft staan, en
+        de markeerstap meldt `marked=1`."""
+        store = InMemoryUpsertStore(now=_CountingClock())
+        _run_round(_volledige_sessie(), run_id="run-1", store=store)
+        self.assertIsNone(store.tables["customer"][103].get("missing_since"))
+
+        zonder_103 = [r for r in _customer_records() if r["id"] != 103]
+        sessie = FullRoundSession(
+            customer_pages=_fractal_pages(zonder_103, per_page=2),
+            project_pages=_fractal_pages(_project_records(), per_page=2),
+            supplier_pages=_laravel_pages(_supplier_records(), per_page=3),
+            customer_details={101: _customer_details()[101], 102: _customer_details()[102]},
+            probe_live=True,
+            cookies=INITIAL_COOKIES,
+        )
+
+        exit_code, store, _, stdout = _run_round(sessie, run_id="run-2", store=store)
+
+        self.assertEqual(exit_code, EXIT_OK)
+        self.assertIn(103, store.tables["customer"], "mark_missing mag nooit een rij verwijderen")
+        self.assertIsNotNone(store.tables["customer"][103]["missing_since"])
+        self.assertIn(
+            "customer: gevonden 2, gemeld 2 (ok), gemarkeerd 1, teruggekeerd 0",
+            stdout.getvalue(),
+        )
+
+    def test_teruggekeerde_rij_verliest_missing_since_in_dezelfde_ronde(self):
+        """Scenario 3: een rij die eerst gemarkeerd is en deze ronde weer
+        `last_seen_run` van de huidige ronde draagt, verliest haar
+        `missing_since` meteen, en de markeerstap meldt `returned=1`.
+
+        `InMemoryUpsertStore.upsert()` vervangt een rij in zijn geheel zodra
+        er iets verschilt (issue 02), in plaats van kolomsgewijs te mergen
+        zoals een echte partial-column SQL-upsert dat doet -- een rij die
+        opnieuw in de HTTP-levering zit zou `missing_since` daardoor al vóór
+        de markeerstap kwijtraken, terwijl Postgres een kolom die niet in de
+        payload zit (`missing_since`) nooit aanraakt. Om puur de bedrading in
+        `run()` te toetsen -- niet die nepstore-fidelity, die buiten de
+        scope van issue 03 valt -- laat deze toets rij 103 buiten de
+        HTTP-levering van ronde 3 en zet vooraf de `last_seen_run` die een
+        échte upsert die ronde zou hebben gezet, zoals
+        `tests/test_persistence.py::test_teruggekeerde_rij_verliest_missing_since`
+        dat ook rechtstreeks op de store doet."""
+        store = InMemoryUpsertStore(now=_CountingClock())
+        _run_round(_volledige_sessie(), run_id="run-1", store=store)
+        zonder_103 = [r for r in _customer_records() if r["id"] != 103]
+        tussensessie = FullRoundSession(
+            customer_pages=_fractal_pages(zonder_103, per_page=2),
+            project_pages=_fractal_pages(_project_records(), per_page=2),
+            supplier_pages=_laravel_pages(_supplier_records(), per_page=3),
+            customer_details={101: _customer_details()[101], 102: _customer_details()[102]},
+            probe_live=True,
+            cookies=INITIAL_COOKIES,
+        )
+        _run_round(tussensessie, run_id="run-2", store=store)
+        self.assertIsNotNone(store.tables["customer"][103]["missing_since"])
+
+        store.tables["customer"][103]["last_seen_run"] = "run-3"
+        exit_code, store, _, stdout = _run_round(tussensessie, run_id="run-3", store=store)
+
+        self.assertEqual(exit_code, EXIT_OK)
+        self.assertIsNone(store.tables["customer"][103]["missing_since"])
+        self.assertIn(
+            "customer: gevonden 2, gemeld 2 (ok), gemarkeerd 0, teruggekeerd 1",
+            stdout.getvalue(),
+        )
+
+    def test_twee_identieke_volledige_rondes_markeren_en_laten_niets_terugkeren(self):
+        """Scenario 4: idempotentie geldt ook voor de markeerstap zelf -- een
+        tweede, ongewijzigde ronde markeert nul rijen en laat nul rijen
+        terugkeren, en de bestaande tellingtoetsen (aantal rijen per tabel)
+        blijven kloppen."""
+        store = InMemoryUpsertStore(now=_CountingClock())
+        _run_round(_volledige_sessie(), run_id="run-1", store=store)
+
+        exit_code, store, _, stdout = _run_round(_volledige_sessie(), run_id="run-2", store=store)
+
+        self.assertEqual(exit_code, EXIT_OK)
+        self.assertEqual(len(store.tables["customer"]), 3)
+        self.assertEqual(len(store.tables["project"]), 4)
+        self.assertEqual(len(store.tables["supplier"]), 5)
+        overzicht = stdout.getvalue()
+        for entity, gevonden in (("customer", 3), ("project", 4), ("supplier", 5)):
+            self.assertIn(
+                f"{entity}: gevonden {gevonden}, gemeld {gevonden} (ok), gemarkeerd 0, teruggekeerd 0",
+                overzicht,
+            )
+
+    def test_voor_migratie_rij_zonder_last_seen_run_wordt_bij_afwezigheid_gemarkeerd(self):
+        """Scenario 5: een rij van vóór de migratie (`last_seen_run is null`)
+        telt niet als gezien in een volledige ronde die haar niet levert, en
+        wordt dus gemarkeerd -- de nul-veilige semantiek uit issue 02."""
+        store = InMemoryUpsertStore(now=_CountingClock())
+        store.tables.setdefault("customer", {})[999] = {
+            "id": 999,
+            "title": "Spookrelatie van vóór de migratie",
+            "fetched_at": "2026-01-01T00:00:00+00:00",
+        }
+
+        exit_code, store, _, _ = _run_round(_volledige_sessie(), run_id="run-1", store=store)
+
+        self.assertEqual(exit_code, EXIT_OK)
+        self.assertIn(999, store.tables["customer"])
+        self.assertIsNotNone(store.tables["customer"][999]["missing_since"])
+
+
+def _onvolledige_customer_sessie():
+    # De bron meldt nog altijd total=3 (ongewijzigd), maar levert er deze
+    # ronde nog maar 2: een hapering, geen bewuste verdwijning van rij 103.
+    onvolledige_customer_pages = _fractal_pages(
+        [r for r in _customer_records() if r["id"] != 103], per_page=2, total=3,
+    )
+    return FullRoundSession(
+        customer_pages=onvolledige_customer_pages,
+        project_pages=_fractal_pages(_project_records(), per_page=2),
+        supplier_pages=_laravel_pages(_supplier_records(), per_page=3),
+        customer_details={101: _customer_details()[101], 102: _customer_details()[102]},
+        probe_live=True,
+        cookies=INITIAL_COOKIES,
+    )
+
+
+class TestOnvolledigeEntiteitSlaatMarkerenOver(unittest.TestCase):
+    """Scenario 2 uit de Testing Decisions: een entiteit die deze ronde
+    onvolledig is markeert niets voor die entiteit en wijzigt geen bestaande
+    `missing_since`. Ronde 1 legt customer 103 vast met `last_seen_run=run-1`
+    en een volledige ronde; ronde 2 levert customer 103 niet meer aan, maar
+    de bron meldt nog altijd total=3 -- rows_stored=2 != source_total=3, dus
+    onvolledig voor customer. Rij 103 heeft na ronde 2 dus nog steeds
+    `last_seen_run=run-1`: precies de toestand waarop `store.mark_missing`
+    zou bijten als de volledigheidsguard in `run()` ontbrak (zie de
+    tegen-pin hieronder)."""
+
+    def test_onvolledige_ronde_markeert_niets_en_laat_missing_since_ongemoeid(self):
+        store = InMemoryUpsertStore(now=_CountingClock())
+        _run_round(_volledige_sessie(), run_id="run-1", store=store)
+        self.assertIsNone(store.tables["customer"][103].get("missing_since"))
+
+        exit_code, store, _, stdout = _run_round(
+            _onvolledige_customer_sessie(), run_id="run-2", store=store,
+        )
+
+        self.assertEqual(exit_code, EXIT_INCOMPLETE)
+        self.assertIsNone(
+            store.tables["customer"][103].get("missing_since"),
+            "een onvolledige ronde mag nooit markeren, ook niet voor een rij "
+            "die deze ronde niet geleverd is",
+        )
+        overzicht = stdout.getvalue()
+        self.assertIn(
+            "customer: gevonden 2, gemeld 3 (onvolledig), markeerstap overgeslagen (onvolledig)",
+            overzicht,
+        )
+
+    def test_andere_entiteiten_markeren_gewoon_door_ondanks_de_onvolledige_customer(self):
+        store = InMemoryUpsertStore(now=_CountingClock())
+        _run_round(_volledige_sessie(), run_id="run-1", store=store)
+
+        _, store, _, stdout = _run_round(_onvolledige_customer_sessie(), run_id="run-2", store=store)
+
+        overzicht = stdout.getvalue()
+        self.assertIn("project: gevonden 4, gemeld 4 (ok), gemarkeerd 0, teruggekeerd 0", overzicht)
+        self.assertIn("supplier: gevonden 5, gemeld 5 (ok), gemarkeerd 0, teruggekeerd 0", overzicht)
+
+
+class TestTegenPinMarkeerstapZonderGuardZouBijten(unittest.TestCase):
+    """Tegen-pin voor scenario 2 (lesson
+    2026-08-29-een-tegen-pin-die-niet-bijt-is-geen-tegen-pin.md): bewijst dat
+    de assertie in `TestOnvolledigeEntiteitSlaatMarkerenOver` niet toevallig
+    groen is.
+
+    Na dezelfde twee rondes als hierboven roept deze test `store.mark_missing`
+    rechtstreeks aan -- precies wat `run()` zou doen als de `if complete:`-
+    guard ontbrak, want de markeerstap raakt alleen de entiteitstabel, niet
+    `extraction_run` of de cookiepot, dus die kale aanroep is exact de
+    kapotte variant. Die kapotte variant markeert rij 103 wél. Zodra de guard
+    uit `run()` verdwijnt, gaat de assertie in
+    `TestOnvolledigeEntiteitSlaatMarkerenOver` dus aantoonbaar rood -- de
+    tegen-pin bijt."""
+
+    def test_markeerstap_zonder_guard_zou_de_gehaperde_rij_ten_onrechte_markeren(self):
+        store = InMemoryUpsertStore(now=_CountingClock())
+        _run_round(_volledige_sessie(), run_id="run-1", store=store)
+        _run_round(_onvolledige_customer_sessie(), run_id="run-2", store=store)
+        self.assertIsNone(store.tables["customer"][103].get("missing_since"))
+
+        marked_without_guard, _ = store.mark_missing("customer", "run-2")
+
+        self.assertEqual(
+            marked_without_guard, 1,
+            "zonder de volledigheidsguard zou de markeerstap rij 103 ten "
+            "onrechte als verdwenen markeren op basis van een bronhapering "
+            "-- dat is precies wat de guard in run() moet voorkomen",
+        )

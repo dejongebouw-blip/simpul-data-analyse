@@ -9,10 +9,12 @@ Vaste volgorde (zie ook `simpul_extract/session.py` voor de sessiestap):
   3. Per entiteit pagineren, parsen en ontdubbelen op `id` (nog niet
      wegschrijven): de bron deelt dezelfde entiteit soms twee keer uit.
   4. Relatiedetails ophalen voor `email` op de al geparste customer-rijen.
-  5. Wegschrijven: elke entiteit in één upsert naar zijn tabel.
+  5. Wegschrijven: elke entiteit in één upsert naar zijn tabel, elke rij
+     gestempeld met `last_seen_run = run_id`.
   6. Volledigheid toetsen per entiteit (rows_stored vs. het door de bron
-     gemelde totaal, gecorrigeerd voor dubbel geleverde rijen) en de
-     auditregel schrijven — ook bij een falende toets.
+     gemelde totaal, gecorrigeerd voor dubbel geleverde rijen); alléén bij een
+     geslaagde toets draait `mark_missing` op die entiteit, en de auditregel
+     wordt sowieso geschreven — ook bij een falende toets.
   7. Geroteerde cookie terugschrijven naar de pot, ongeacht de uitkomst van
      stap 6: een datafout mag de sessie niet kosten.
 
@@ -81,14 +83,18 @@ ENTITIES: Sequence[EntitySpec] = (
 
 @dataclass(frozen=True)
 class EntityOutcome:
-    """Resultaat van één entiteit: wat is gevonden, wat meldt de bron, en
-    of dat overeenkomt."""
+    """Resultaat van één entiteit: wat is gevonden, wat meldt de bron, of
+    dat overeenkomt, en wat de markeerstap (`mark_missing`) opleverde. Bij
+    een onvolledige ronde blijven `marked`/`returned` `None` — de markeerstap
+    draait dan niet."""
 
     entity: str
     rows_stored: int
     source_total: Optional[int]
     complete: bool
     duplicates: int = 0
+    marked: Optional[int] = None
+    returned: Optional[int] = None
 
 
 def _default_now() -> str:
@@ -103,6 +109,11 @@ def format_summary(outcomes: Sequence[EntityOutcome], email_found: int) -> str:
         f"{outcome.entity}: gevonden {outcome.rows_stored}, gemeld {outcome.source_total}"
         + (f", {outcome.duplicates} dubbel geleverd" if outcome.duplicates else "")
         + f" ({'ok' if outcome.complete else 'onvolledig'})"
+        + (
+            f", gemarkeerd {outcome.marked}, teruggekeerd {outcome.returned}"
+            if outcome.complete
+            else ", markeerstap overgeslagen (onvolledig)"
+        )
         for outcome in outcomes
     ]
     lines.append(f"e-mailadressen gevonden: {email_found}")
@@ -189,7 +200,11 @@ def run(
     for entity in ENTITIES:
         data = collected[entity.name]
         rows = data["rows"]
-        store.upsert(entity.table, rows)
+        # Elke rij draagt `last_seen_run` naast de bestaande `fetched_at`-
+        # stempeling: dat is de naad waarop `mark_missing` straks een rij van
+        # deze ronde onderscheidt van een rij die deze ronde niet geleverd is.
+        payload = [dict(row, last_seen_run=run_id) for row in rows]
+        store.upsert(entity.table, payload)
         rows_stored = len(rows)
         duplicates = data["duplicates"]
         gemeld_totaal = data["source_total"]
@@ -209,6 +224,22 @@ def run(
         complete = source_total is not None and rows_stored == source_total
         if not complete:
             incomplete = True
+        # De markeerstap draait alléén achter een geslaagde volledigheidstoets
+        # voor déze entiteit: een onvolledige ronde (hapering in bron of
+        # parser) mag nooit rijen als spookrecord markeren. Zie US-3/SC-3.
+        marked: Optional[int] = None
+        returned: Optional[int] = None
+        if complete:
+            marked, returned = store.mark_missing(entity.table, run_id)
+            logger.info(
+                "%s: markeerstap, %d gemarkeerd, %d teruggekeerd",
+                entity.name, marked, returned,
+            )
+        else:
+            logger.info(
+                "%s: markeerstap overgeslagen, ronde onvolledig voor deze entiteit",
+                entity.name,
+            )
         finished_at = now()
         notities = []
         if duplicates:
@@ -234,7 +265,10 @@ def run(
             "volledig" if complete else "ONVOLLEDIG",
         )
         outcomes.append(
-            EntityOutcome(entity.name, rows_stored, source_total, complete, duplicates)
+            EntityOutcome(
+                entity.name, rows_stored, source_total, complete, duplicates,
+                marked=marked, returned=returned,
+            )
         )
 
     session_round.finish()
