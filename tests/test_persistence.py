@@ -45,6 +45,10 @@ class TestUpsertStoreInterface(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             UpsertStore().upsert("customer", [])
 
+    def test_kale_interface_mark_missing_werpt_not_implemented(self):
+        with self.assertRaises(NotImplementedError):
+            UpsertStore().mark_missing("customer", "run-1")
+
     def test_inmemory_store_voldoet_aan_de_interface(self):
         self.assertIsInstance(InMemoryUpsertStore(), UpsertStore)
 
@@ -133,27 +137,45 @@ class _StubPostgrestResponse:
     (`Context/lessons/2026-08-29-een-gestubde-naad-is-geen-getoetste-naad.md`).
     """
 
-    def __init__(self, status_code=201, body="", headers=None):
+    def __init__(self, status_code=201, body="", headers=None, json_body=None):
         self.status_code = status_code
         self.text = body
         self.headers = headers or {}
+        self._json_body = json_body if json_body is not None else []
 
     def raise_for_status(self):
         return None
+
+    def json(self):
+        return self._json_body
 
 
 class _RecordingPostgrestSession:
     """Netwerkloze stub voor de echte PostgREST-implementatie: registreert
     elk verzoek maar verlaat het proces nooit. Bewijst dat de echte
     implementatie ON CONFLICT (id) DO UPDATE aanvraagt, zonder ooit het
-    echte Supabase-project te raken (durable regel 5)."""
+    echte Supabase-project te raken (durable regel 5).
 
-    def __init__(self):
+    `patch_responses` is een wachtrij van rijenlijsten: elke `patch()`-aanroep
+    levert de volgende lijst als `response.json()`, zodat een test de
+    `marked`/`returned`-telling van `mark_missing` kan sturen zonder een
+    echte PostgREST-respons na te bouwen."""
+
+    def __init__(self, patch_responses=None):
         self.calls = []
+        self._patch_responses = list(patch_responses) if patch_responses is not None else None
 
     def post(self, url, json=None, params=None, headers=None):
-        self.calls.append({"url": url, "json": json, "params": params, "headers": headers})
+        self.calls.append({"method": "POST", "url": url, "json": json, "params": params, "headers": headers})
         return _StubPostgrestResponse()
+
+    def patch(self, url, json=None, params=None, headers=None):
+        self.calls.append({"method": "PATCH", "url": url, "json": json, "params": params, "headers": headers})
+        if self._patch_responses is not None:
+            rows = self._patch_responses.pop(0)
+        else:
+            rows = []
+        return _StubPostgrestResponse(json_body=rows)
 
 
 class TestPostgrestUpsertStoreBestaatEnGebruiktOnConflict(unittest.TestCase):
@@ -183,6 +205,140 @@ class TestPostgrestUpsertStoreBestaatEnGebruiktOnConflict(unittest.TestCase):
         store.upsert("customer", [])
 
         self.assertEqual(session.calls, [])
+
+
+class TestInMemoryMarkMissing(unittest.TestCase):
+    def test_niet_geziene_rij_krijgt_missing_since(self):
+        store = InMemoryUpsertStore(now=_CountingClock())
+        store.upsert("customer", [{"id": 1, "title": "Klant een"}])
+        store.tables["customer"][1]["last_seen_run"] = "run-oud"
+
+        marked, returned = store.mark_missing("customer", "run-nieuw")
+
+        self.assertEqual((marked, returned), (1, 0))
+        self.assertIsNotNone(store.tables["customer"][1]["missing_since"])
+
+    def test_geziene_rij_blijft_ongemoeid(self):
+        store = InMemoryUpsertStore(now=_CountingClock())
+        store.upsert("customer", [{"id": 1, "title": "Klant een"}])
+        store.tables["customer"][1]["last_seen_run"] = "run-nieuw"
+
+        marked, returned = store.mark_missing("customer", "run-nieuw")
+
+        self.assertEqual((marked, returned), (0, 0))
+        self.assertIsNone(store.tables["customer"][1].get("missing_since"))
+
+    def test_rij_van_voor_de_migratie_zonder_last_seen_run_is_niet_gezien(self):
+        # `last_seen_run is null` is geen "gelijk aan run-nieuw", dus telt als
+        # niet gezien -- de nul-semantiek die het contract expliciet vereist.
+        store = InMemoryUpsertStore(now=_CountingClock())
+        store.upsert("customer", [{"id": 1, "title": "Klant een"}])
+        self.assertNotIn("last_seen_run", store.tables["customer"][1])
+
+        marked, returned = store.mark_missing("customer", "run-nieuw")
+
+        self.assertEqual((marked, returned), (1, 0))
+        self.assertIsNotNone(store.tables["customer"][1]["missing_since"])
+
+    def test_al_gemarkeerde_rij_wordt_niet_opnieuw_gemarkeerd(self):
+        store = InMemoryUpsertStore(now=_CountingClock())
+        store.upsert("customer", [{"id": 1, "title": "Klant een"}])
+        store.tables["customer"][1]["last_seen_run"] = "run-oud"
+
+        store.mark_missing("customer", "run-nieuw")
+        eerste_missing_since = store.tables["customer"][1]["missing_since"]
+        marked, returned = store.mark_missing("customer", "run-nieuw")
+
+        self.assertEqual((marked, returned), (0, 0))
+        self.assertEqual(store.tables["customer"][1]["missing_since"], eerste_missing_since)
+
+    def test_teruggekeerde_rij_verliest_missing_since(self):
+        store = InMemoryUpsertStore(now=_CountingClock())
+        store.upsert("customer", [{"id": 1, "title": "Klant een"}])
+        row = store.tables["customer"][1]
+        row["last_seen_run"] = "run-oud"
+        row["missing_since"] = "2026-08-29T00:00:00+00:00"
+
+        marked, returned = store.mark_missing("customer", "run-oud")
+
+        self.assertEqual((marked, returned), (0, 1))
+        self.assertIsNone(store.tables["customer"][1]["missing_since"])
+
+    def test_mark_missing_verwijdert_nooit_een_rij(self):
+        store = InMemoryUpsertStore(now=_CountingClock())
+        store.upsert("customer", [
+            {"id": 1, "title": "Klant een"},
+            {"id": 2, "title": "Klant twee"},
+        ])
+        store.tables["customer"][1]["last_seen_run"] = "run-oud"
+        store.tables["customer"][2]["last_seen_run"] = "run-nieuw"
+
+        store.mark_missing("customer", "run-nieuw")
+
+        self.assertEqual(len(store.tables["customer"]), 2)
+        self.assertEqual(store.tables["customer"][2]["title"], "Klant twee")
+
+    def test_mark_missing_op_lege_tabel_doet_niets(self):
+        store = InMemoryUpsertStore(now=_CountingClock())
+
+        marked, returned = store.mark_missing("customer", "run-1")
+
+        self.assertEqual((marked, returned), (0, 0))
+
+
+class TestPostgrestMarkMissing(unittest.TestCase):
+    def test_markeer_verzoek_gebruikt_het_null_veilige_filter(self):
+        session = _RecordingPostgrestSession(patch_responses=[[{"id": 1}, {"id": 2}], []])
+        store = PostgrestUpsertStore(
+            base_url="https://example.invalid/rest/v1",
+            api_key="geheim",
+            session=session,
+            now=lambda: "2026-08-30T00:00:00+00:00",
+        )
+
+        marked, returned = store.mark_missing("customer", "run-42")
+
+        self.assertEqual((marked, returned), (2, 0))
+        self.assertEqual(len(session.calls), 2)
+
+        markeer_call = session.calls[0]
+        self.assertEqual(markeer_call["method"], "PATCH")
+        self.assertEqual(markeer_call["url"], "https://example.invalid/rest/v1/customer")
+        self.assertEqual(
+            markeer_call["params"],
+            {"missing_since": "is.null", "or": "(last_seen_run.neq.run-42,last_seen_run.is.null)"},
+        )
+        self.assertEqual(markeer_call["json"], {"missing_since": "2026-08-30T00:00:00+00:00"})
+        self.assertEqual(markeer_call["headers"]["Content-Profile"], "simpul_raw")
+        self.assertEqual(markeer_call["headers"]["Prefer"], "return=representation")
+
+    def test_terugkeer_verzoek_zet_missing_since_op_null(self):
+        session = _RecordingPostgrestSession(patch_responses=[[], [{"id": 5}]])
+        store = PostgrestUpsertStore(
+            base_url="https://example.invalid",
+            api_key="geheim",
+            session=session,
+        )
+
+        marked, returned = store.mark_missing("customer", "run-42")
+
+        self.assertEqual((marked, returned), (0, 1))
+        terugkeer_call = session.calls[1]
+        self.assertEqual(terugkeer_call["method"], "PATCH")
+        self.assertEqual(
+            terugkeer_call["params"],
+            {"last_seen_run": "eq.run-42", "missing_since": "not.is.null"},
+        )
+        self.assertEqual(terugkeer_call["json"], {"missing_since": None})
+
+    def test_geweigerde_patch_loopt_via_raise_for_write(self):
+        session = _RecordingPostgrestSession()
+        session.patch = lambda *a, **k: _StubPostgrestResponse(status_code=400, body='{"message": "kolom bestaat niet"}')
+        store = PostgrestUpsertStore(base_url="https://example.invalid", api_key="geheim", session=session)
+
+        with self.assertRaises(StorageError) as ctx:
+            store.mark_missing("customer", "run-42")
+        self.assertIn("kolom bestaat niet", str(ctx.exception))
 
 
 class TestPostgrestStoreFromEnv(unittest.TestCase):

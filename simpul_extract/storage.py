@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Mapping, Sequence
+from typing import Any, Callable, Dict, Mapping, Sequence, Tuple
 
 from simpul_extract.observability import describe_http_response, get_logger
 
@@ -104,6 +104,12 @@ class UpsertStore:
         """
         raise NotImplementedError
 
+    def mark_missing(self, table: str, run_id: Any) -> Tuple[int, int]:
+        """Markeert rijen die deze ronde niet gezien zijn, en herstelt rijen
+        die terugkeerden. Zie `InMemoryUpsertStore.mark_missing` en
+        `PostgrestUpsertStore.mark_missing` voor de gedeelde semantiek."""
+        raise NotImplementedError
+
 
 class InMemoryUpsertStore(UpsertStore):
     """In-memory nepimplementatie: geen Postgres, geen netwerk.
@@ -178,6 +184,30 @@ class InMemoryUpsertStore(UpsertStore):
                 previous["fetched_at"] = fetched_at
 
         return UpsertResult(inserted=inserted, updated=updated)
+
+    def mark_missing(self, table: str, run_id: Any) -> Tuple[int, int]:
+        """Markeert rijen als spookrecord, en herstelt rijen die terugkeerden.
+
+        Nul-semantiek zoals PostgREST die vereist: een rij zonder
+        `last_seen_run` (`None`, van vóór de migratie) telt als niet gezien
+        door deze run, dus `!= run_id` — niet `is not None`. Beide passes
+        zetten alleen `missing_since`; geen rij wordt verwijderd of anderszins
+        gewijzigd."""
+        rows = self.tables.setdefault(table, {})
+
+        marked = 0
+        for row in rows.values():
+            if row.get("missing_since") is None and row.get("last_seen_run") != run_id:
+                row["missing_since"] = self._now()
+                marked += 1
+
+        returned = 0
+        for row in rows.values():
+            if row.get("last_seen_run") == run_id and row.get("missing_since") is not None:
+                row["missing_since"] = None
+                returned += 1
+
+        return marked, returned
 
 
 class PostgrestUpsertStore(UpsertStore):
@@ -255,6 +285,51 @@ class PostgrestUpsertStore(UpsertStore):
         )
         raise_for_write(response, table, "append")
         return UpsertResult(inserted=len(rows), updated=0)
+
+    def mark_missing(self, table: str, run_id: Any) -> Tuple[int, int]:
+        """Twee PATCH-verzoeken: markeren, dan terugkeer. `Prefer:
+        return=representation` levert de geraakte rijen terug, waarvan de
+        lengte de telling is — PostgREST meldt bij een PATCH zelf geen aantal.
+
+        Het markeer-filter is null-veilig: `last_seen_run.neq.<run>` alleen
+        matcht geen `null`-rijen in Postgres, en rijen van vóór de migratie
+        hebben `last_seen_run is null`. Het `or`-filter vangt beide gevallen.
+        """
+        marked = self._patch_missing(
+            table,
+            params={
+                "missing_since": "is.null",
+                "or": f"(last_seen_run.neq.{run_id},last_seen_run.is.null)",
+            },
+            body={"missing_since": self._now()},
+            operation="mark_missing:markeren",
+        )
+        returned = self._patch_missing(
+            table,
+            params={
+                "last_seen_run": f"eq.{run_id}",
+                "missing_since": "not.is.null",
+            },
+            body={"missing_since": None},
+            operation="mark_missing:terugkeer",
+        )
+        return marked, returned
+
+    def _patch_missing(self, table: str, params: Mapping[str, str], body: Mapping[str, Any], operation: str) -> int:
+        response = self._session.patch(
+            f"{self._base_url}/{table}",
+            json=body,
+            params=params,
+            headers={
+                "apikey": self._api_key,
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+                "Content-Profile": SCHEMA,
+                "Prefer": "return=representation",
+            },
+        )
+        raise_for_write(response, table, operation)
+        return len(response.json())
 
 
 REST_PATH = "/rest/v1"
