@@ -131,12 +131,40 @@ def _apply_cookies(session, cookies):
         add_secrets(value)
 
 
+def _iter_jar(jar):
+    """Levert (naam, waarde, domein, pad) per cookie. Een echte cookiejar
+    itereert Cookie-objecten; de teststubs dragen een gewone mapping."""
+    for item in jar:
+        if hasattr(item, "name"):
+            yield item.name, item.value, item.domain or "", item.path or "/"
+        else:
+            yield item, jar[item], "", "/"
+
+
 def _read_tracked_cookies(session):
-    return {
-        name: value
-        for name, value in dict(session.cookies).items()
-        if _is_tracked_cookie(name)
-    }
+    # `dict(session.cookies)` werpt CookieConflictError zodra dezelfde naam
+    # twee keer in de jar zit, en dat gebeurt structureel: start() injecteert
+    # de potcookies zonder domein (domain=''), en de bron zet bij elke
+    # respons een vers XSRF-TOKEN en __Host-s mét domein. Gemeten tegen de
+    # echte bron (2026-08-30): beide varianten staan dan naast elkaar. De
+    # hostgezette cookie draagt de geroteerde waarde en wint; de domeinloze
+    # injectie is de oude potkopie. Vandaar: meest specifiek (langste domein,
+    # dan langste pad) wint, bij gelijke rang de laatst geziene.
+    winners = {}
+    for name, value, domain, path in _iter_jar(session.cookies):
+        if not _is_tracked_cookie(name):
+            continue
+        rank = (len(domain), len(path))
+        if name in winners and domain and winners[name][2]:
+            # Twee hostgezette cookies met dezelfde naam is een vorm die de
+            # meting niet kent; kies deterministisch maar maak het zichtbaar.
+            logger.warning(
+                "cookiejar draagt %r op twee domeinen (%r en %r); "
+                "de meest specifieke wint", name, winners[name][2], domain,
+            )
+        if name not in winners or rank >= winners[name][0]:
+            winners[name] = (rank, value, domain)
+    return {name: value for name, (_, value, _) in winners.items()}
 
 
 def _extract_csrf_token(login_page):

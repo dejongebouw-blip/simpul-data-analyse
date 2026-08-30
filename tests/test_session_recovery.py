@@ -30,6 +30,28 @@ ROTATED_COOKIES = {
 LOGIN_PAGE_HTML = '<form><input type="hidden" name="_token" value="csrf-abc123"></form>'
 
 
+def _jar_zoals_gemeten_op_de_bron():
+    """Bouwt de jar-toestand die op 2026-08-30 tegen de echte bron gemeten is:
+    start() injecteert de potcookies zonder domein (domain=''), en de bron zet
+    bij elke respons een vers XSRF-TOKEN en __Host-s mét domein. Beide
+    varianten staan dan naast elkaar in de jar, en `dict(jar)` werpt
+    CookieConflictError — precies waar ronde 6 op viel."""
+    from requests.cookies import RequestsCookieJar
+
+    jar = RequestsCookieJar()
+    for name, value in INITIAL_COOKIES.items():
+        jar[name] = value  # zoals _apply_cookies: domain='', path='/'
+    for name in ("XSRF-TOKEN", "__Host-s"):
+        jar.set(
+            name,
+            ROTATED_COOKIES[name],
+            domain="schoutenhoveniers.simpul.nl",
+            path="/",
+            secure=True,
+        )
+    return jar
+
+
 def _count_login_posts(session):
     return len([
         call for call in session.calls
@@ -100,6 +122,25 @@ class TestSessionRecovery(unittest.TestCase):
         self.assertEqual(exit_code, EXIT_OK)
         self.assertEqual(_count_login_posts(session), 0)
         self.assertEqual(pot.write_calls, [INITIAL_COOKIES])
+
+    def test_finish_overleeft_dubbele_cookienamen_en_de_hostgezette_wint(self):
+        # Tegen-pin voor het defect van ronde 6 (2026-08-29): finish() viel op
+        # CookieConflictError zodra de jar dezelfde naam twee keer droeg. De
+        # hostgezette variant draagt de door Laravel geroteerde waarde en moet
+        # winnen; de domeinloze injectie is de oude potkopie. Het
+        # remember-cookie is niet geroteerd en behoudt zijn oude waarde.
+        session = StubSession()
+        session.cookies = _jar_zoals_gemeten_op_de_bron()
+        client = SimpulHTTPClient(session, sleep=lambda s: None)
+        pot = StubCookiePot(initial=INITIAL_COOKIES)
+        round_ = SessionRound(client, session, pot, "gebruiker", "wachtwoord")
+
+        round_.finish()
+
+        expected = dict(INITIAL_COOKIES)
+        expected["XSRF-TOKEN"] = ROTATED_COOKIES["XSRF-TOKEN"]
+        expected["__Host-s"] = ROTATED_COOKIES["__Host-s"]
+        self.assertEqual(pot.write_calls, [expected])
 
     def test_session_is_lost_herkent_redirect_en_html(self):
         self.assertTrue(session_is_lost(
