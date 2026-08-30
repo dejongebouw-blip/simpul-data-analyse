@@ -40,6 +40,8 @@ EXPECTED_COLUMNS = {
         "url_show",
         "email",
         "fetched_at",
+        "last_seen_run",
+        "missing_since",
     ),
     "project": (
         "id",
@@ -55,6 +57,8 @@ EXPECTED_COLUMNS = {
         "project_location",
         "status_id",
         "fetched_at",
+        "last_seen_run",
+        "missing_since",
     ),
     "supplier": (
         "id",
@@ -68,6 +72,8 @@ EXPECTED_COLUMNS = {
         "url_show",
         "text",
         "fetched_at",
+        "last_seen_run",
+        "missing_since",
     ),
     "extraction_run": (
         "id",
@@ -143,6 +149,17 @@ SERVICE_ROLE_GRANTS = (
     r"grant select, insert, update, delete on all tables in schema simpul_raw to",
     r"alter default privileges in schema simpul_raw grant select, insert, update, delete on tables to",
 )
+
+# issue 01 (SC-6): welke drie tabellen `last_seen_run` en `missing_since`
+# dragen, en met welk type ze in de driftcontrole-array moeten staan. De
+# bestaande database heeft deze tabellen al gevuld, dus alleen de `create
+# table if not exists` zou stilzwijgend niets doen -- de `alter table ...
+# add column if not exists` ernaast is wat de kolom er daadwerkelijk bij zet.
+ENTITY_TABLES_WITH_TRACKING = ("customer", "project", "supplier")
+TRACKING_COLUMNS = {
+    "last_seen_run": "uuid",
+    "missing_since": "timestamp with time zone",
+}
 
 
 def _statement_targets_role(code: str, statement_prefix: str, role: str) -> bool:
@@ -243,6 +260,32 @@ class TestSchemaContract(unittest.TestCase):
         self.assertIn("pg_attribute", self.sql)
         self.assertIn("format_type", self.sql)
 
+    def test_last_seen_run_and_missing_since_added_idempotently(self) -> None:
+        """De bestaande database heeft `customer`, `project` en `supplier`
+        al gevuld staan wanneer deze kolommen erbij komen (SC-6). Alleen de
+        `create table if not exists` zou stilzwijgend niets doen -- er hoort
+        een `alter table ... add column if not exists` naast te staan, net
+        als de aanleiding voor de driftcontrole zelf."""
+        for table in ENTITY_TABLES_WITH_TRACKING:
+            with self.subTest(table=table):
+                self.assertRegex(
+                    self.code,
+                    rf"alter table simpul_raw\.{re.escape(table)} add column if not exists last_seen_run uuid",
+                )
+                self.assertRegex(
+                    self.code,
+                    rf"alter table simpul_raw\.{re.escape(table)} add column if not exists missing_since timestamptz",
+                )
+
+    def test_drift_control_covers_last_seen_run_and_missing_since(self) -> None:
+        """De driftcontrole-array moet beide nieuwe kolommen dekken op alle
+        drie de tabellen, met hetzelfde type als in de `create table`- en
+        `alter table`-statements, zonder default, identity of afleiding."""
+        for table in ENTITY_TABLES_WITH_TRACKING:
+            for column, typ in TRACKING_COLUMNS.items():
+                with self.subTest(table=table, column=column):
+                    self.assertIn(f"['{table}','{column}','{typ}','','','f']", self.sql)
+
     def test_grants_revoked_for_anon_and_authenticated(self) -> None:
         for statement in REVOKE_STATEMENTS:
             with self.subTest(statement=statement):
@@ -331,6 +374,38 @@ class TestCounterPin(unittest.TestCase):
                 broken, r"grant usage on schema simpul_raw to", "service_role"
             )
         )
+
+    def test_missing_last_seen_run_in_definition_is_detected(self) -> None:
+        """Alleen `missing_since` toegevoegd, `last_seen_run` vergeten in de
+        `create table`-definitie -- de kolomlijst-pin hoort dit rood te
+        maken."""
+        broken = """
+        create table if not exists simpul_raw.customer (
+            id bigint primary key,
+            customer_number text,
+            title text,
+            address text,
+            zipcode text,
+            city text,
+            phone text,
+            mobile text,
+            display_status text,
+            tasks_status text,
+            url_show text,
+            email text,
+            fetched_at timestamptz,
+            missing_since timestamptz
+        );
+        """
+        body = _table_body(broken, "customer")
+        self.assertNotEqual(_column_names(body), EXPECTED_COLUMNS["customer"])
+
+    def test_missing_tracking_column_in_drift_array_is_detected(self) -> None:
+        """De definitie kreeg beide kolommen, maar de driftcontrole-array
+        vergat `missing_since` op te nemen -- een database zonder die kolom
+        zou dan stilzwijgend groen blijven in plaats van luid te falen."""
+        broken_array_snippet = "['customer','last_seen_run','uuid','','','f'],"
+        self.assertNotIn("['customer','missing_since','timestamp with time zone','','','f']", broken_array_snippet)
 
     def test_grant_to_anon_is_detected(self) -> None:
         """De omgekeerde fout: het schema per ongeluk openzetten voor de

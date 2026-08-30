@@ -50,7 +50,9 @@ create table if not exists simpul_raw.customer (
     tasks_status text,
     url_show text,
     email text,
-    fetched_at timestamptz default now()
+    fetched_at timestamptz default now(),
+    last_seen_run uuid,
+    missing_since timestamptz
 );
 
 create table if not exists simpul_raw.project (
@@ -66,7 +68,9 @@ create table if not exists simpul_raw.project (
     url_show text,
     project_location jsonb,
     status_id text,
-    fetched_at timestamptz default now()
+    fetched_at timestamptz default now(),
+    last_seen_run uuid,
+    missing_since timestamptz
 );
 
 create table if not exists simpul_raw.supplier (
@@ -80,8 +84,21 @@ create table if not exists simpul_raw.supplier (
     mobile text,
     url_show text,
     text text,
-    fetched_at timestamptz default now()
+    fetched_at timestamptz default now(),
+    last_seen_run uuid,
+    missing_since timestamptz
 );
+
+-- De bestaande database had deze drie tabellen al toen `last_seen_run` en
+-- `missing_since` hier bijkwamen (SC-6). Zonder deze `alter table` zou
+-- alleen de `create table if not exists` hierboven stilzwijgend niets doen —
+-- precies het faalgeval dat in de kop van dit bestand staat beschreven.
+alter table simpul_raw.customer add column if not exists last_seen_run uuid;
+alter table simpul_raw.customer add column if not exists missing_since timestamptz;
+alter table simpul_raw.project add column if not exists last_seen_run uuid;
+alter table simpul_raw.project add column if not exists missing_since timestamptz;
+alter table simpul_raw.supplier add column if not exists last_seen_run uuid;
+alter table simpul_raw.supplier add column if not exists missing_since timestamptz;
 
 -- `complete` is afgeleid, niet aangeleverd. De database rekent het vinkje uit
 -- de twee getallen in dezelfde rij, zodat er nooit een auditregel kan bestaan
@@ -170,6 +187,8 @@ declare
         ['customer','url_show','text','','','f'],
         ['customer','email','text','','','f'],
         ['customer','fetched_at','timestamp with time zone','','','t'],
+        ['customer','last_seen_run','uuid','','','f'],
+        ['customer','missing_since','timestamp with time zone','','','f'],
         ['project','id','bigint','','','f'],
         ['project','project_number','text','','','f'],
         ['project','name','text','','','f'],
@@ -183,6 +202,8 @@ declare
         ['project','url_show','text','','','f'],
         ['project','project_location','jsonb','','','f'],
         ['project','fetched_at','timestamp with time zone','','','t'],
+        ['project','last_seen_run','uuid','','','f'],
+        ['project','missing_since','timestamp with time zone','','','f'],
         ['supplier','id','bigint','','','f'],
         ['supplier','name','text','','','f'],
         ['supplier','address','text','','','f'],
@@ -194,6 +215,8 @@ declare
         ['supplier','url_show','text','','','f'],
         ['supplier','text','text','','','f'],
         ['supplier','fetched_at','timestamp with time zone','','','t'],
+        ['supplier','last_seen_run','uuid','','','f'],
+        ['supplier','missing_since','timestamp with time zone','','','f'],
         ['extraction_run','id','bigint','','a','f'],
         ['extraction_run','run_id','uuid','','','f'],
         ['extraction_run','started_at','timestamp with time zone','','','t'],
